@@ -1,0 +1,132 @@
+"""Graph-level guarantees, exercised against a stub retriever and stub agents.
+
+The point of these tests is the one property the spec calls non-negotiable:
+MAX_ITERATIONS is enforced by the graph itself, so a broken gate cannot loop.
+"""
+from __future__ import annotations
+
+import pytest
+
+import config
+import graph as graph_mod
+from retrieval import Chunk
+
+
+class StubRetriever:
+    def __init__(self):
+        self.calls = 0
+
+    def search(self, query, k=5, **kw):
+        self.calls += 1
+        # Fresh chunk ids each call so evidence genuinely grows.
+        return [Chunk(chunk_id=f"c{self.calls}-{i}", title=f"T{i}",
+                      text=f"passage {self.calls}-{i}", score=1.0 / (i + 1))
+                for i in range(k)]
+
+
+class RunawayPolicy:
+    """A deliberately broken gate that always says 'retrieve'."""
+    name = "runaway"
+
+    def decide(self, state):
+        return "retrieve"
+
+
+@pytest.fixture()
+def stubbed(monkeypatch):
+    from agents import generator, planner, verifier
+
+    retriever = StubRetriever()
+    monkeypatch.setattr(graph_mod, "get_retriever", lambda: retriever)
+    monkeypatch.setattr(planner, "plan",
+                        lambda q, *a, **kw: f"{q} (refined)")
+    monkeypatch.setattr(
+        generator, "generate",
+        lambda q, ev, **kw: f"answer from {len(ev)} chunks")
+
+    coverages = iter([0.2, 0.4, 0.55, 0.65, 0.7, 0.72, 0.73, 0.74])
+
+    def fake_verify(question, evidence, **kw):
+        return verifier.Verification(
+            coverage=next(coverages, 0.75), missing="more", confident=False)
+
+    monkeypatch.setattr(verifier, "verify", fake_verify)
+    return retriever
+
+
+def test_max_iterations_is_enforced_against_a_broken_gate(stubbed):
+    """The headline safety property: a gate bug cannot loop."""
+    final = graph_mod.run_query("q?", RunawayPolicy(), query_id="runaway-1")
+    assert final["iteration"] == config.MAX_ITERATIONS
+    assert final["stop_reason"] == "max_iter"
+    assert stubbed.calls == config.MAX_ITERATIONS
+
+
+def test_fixed_policy_completes_end_to_end(stubbed):
+    from policies import FixedPolicy
+
+    final = graph_mod.run_query("q?", FixedPolicy(n=3), query_id="fx-1")
+    assert final["iteration"] == 3
+    assert final["stop_reason"] == "fixed"
+    assert final["answer"].startswith("answer from")
+
+
+def test_per_iteration_cost_and_coverage_are_logged_for_every_iteration(stubbed):
+    from policies import FixedPolicy
+
+    final = graph_mod.run_query("q?", FixedPolicy(n=3), query_id="fx-2")
+    assert len(final["coverage_history"]) == 3
+    assert len(final["cost_history"]) == 3
+    assert len(final["latency_history"]) == 3
+
+
+def test_evidence_is_deduplicated_across_iterations(monkeypatch, stubbed):
+    from policies import FixedPolicy
+
+    # Force the retriever to return the same chunks every time.
+    fixed_hits = [Chunk(chunk_id="same", title="T", text="p", score=1.0)]
+    monkeypatch.setattr(graph_mod, "get_retriever",
+                        lambda: type("R", (), {"search": lambda s, *a, **k: fixed_hits})())
+
+    final = graph_mod.run_query("q?", FixedPolicy(n=3), query_id="dedup-1")
+    assert len(final["evidence"]) == 1, "duplicate chunks accumulated"
+
+
+def test_state_summary_shape(stubbed):
+    from policies import FixedPolicy
+
+    final = graph_mod.run_query("q?", FixedPolicy(n=2), query_id="sum-1")
+    s = graph_mod.state_summary(final)
+    for field in ("query_id", "policy", "iterations_used", "stop_reason",
+                  "total_usd", "total_latency_ms", "final_coverage", "answer"):
+        assert field in s
+
+
+def test_confidence_short_circuit_is_off_by_default(monkeypatch, stubbed):
+    """Baselines must not inherit a stopping rule CAES has (or vice versa)."""
+    from agents import verifier
+    from policies import FixedPolicy
+
+    monkeypatch.setattr(
+        verifier, "verify",
+        lambda q, ev, **kw: verifier.Verification(
+            coverage=1.0, missing="nothing", confident=True))
+
+    final = graph_mod.run_query("q?", FixedPolicy(n=3), query_id="conf-off")
+    assert final["iteration"] == 3
+    assert final["stop_reason"] == "fixed"
+
+
+def test_confidence_short_circuit_works_when_enabled(monkeypatch, stubbed):
+    from agents import verifier
+    from policies import FixedPolicy
+
+    monkeypatch.setattr(
+        verifier, "verify",
+        lambda q, ev, **kw: verifier.Verification(
+            coverage=1.0, missing="nothing", confident=True))
+
+    final = graph_mod.run_query("q?", FixedPolicy(n=3), query_id="conf-on",
+                                honor_confidence=True)
+    assert final["iteration"] == 1
+    assert final["stop_reason"] == "confident"

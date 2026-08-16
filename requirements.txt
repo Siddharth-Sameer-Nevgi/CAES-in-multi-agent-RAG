@@ -1,0 +1,23 @@
+# Core
+boto3>=1.34.0
+numpy>=1.26.0
+pandas>=2.1.0
+faiss-cpu>=1.7.4
+tqdm>=4.66.0
+
+# Graph orchestration
+langgraph>=0.2.0
+
+# Data
+datasets>=2.16.0
+
+# Analysis / plots
+matplotlib>=3.8.0
+scipy>=1.11.0
+
+# API layer
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# Dev
+pytest>=8.0.0

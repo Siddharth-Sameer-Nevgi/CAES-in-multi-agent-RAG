@@ -1,0 +1,19 @@
+# Spend ledger — machine-local, never share or commit
+.spend_ledger.json
+.spend_ledger.json.tmp
+
+# Response cache (large, regenerable)
+.cache/
+
+# Corpus, index, and question splits (rebuild with ingest.py)
+data/
+
+# Experiment outputs
+results/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
