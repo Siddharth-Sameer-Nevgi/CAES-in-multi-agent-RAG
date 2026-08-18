@@ -545,6 +545,65 @@ Delete `data/` between the two.
 
 ---
 
+### [D-21] λ grid resolution is a research-correctness issue, not tuning convenience
+
+**Context.** The original grid was `[0.1, 1, 10, 100, 1000]` — decade-spaced.
+Sweeping it under `DRY_RUN` produced uniform iteration counts at almost every
+value: λ=20 → all 40 queries stop at iteration 3; λ=90, 200 → all stop at 2;
+λ=2000 → all stop at 1. Only λ≈60 showed real spread.
+
+**Decision.** Coarse grid is now half-decade-spaced,
+`[1, 3, 10, 30, 100, 300, 1000]`. Refinement is **log-spaced** about the knee
+(`centre × [0.3, 0.5, 0.7, 1.0, 1.4, 2.0, 3.0]`) rather than linear. Every swept
+λ records its iteration distribution and largest-bucket share in
+`results/lambda_sweep.csv`, and a degenerate spread at the recommended λ prints
+a warning naming the best-spread alternative.
+
+**Why this is correctness, not polish.** The gate's sensitive band — where
+`λ·ΔC` is the same order as ΔQ, so the decision actually depends on the query —
+is narrow. Outside it, the margin's sign is constant and CAES degenerates into a
+fixed-depth policy that happens to be spelled differently. A decade-spaced grid
+steps clean over that band.
+
+The failure is silent and it corrupts the *claim*, not the code. At a degenerate
+λ the pipeline runs, F1 and cost are real, and the headline cost reduction may
+look excellent. But the paper's central figure — CAES spread across 1–5 versus
+Fixed flat at N — becomes a single bar, which is visually identical to a fixed
+policy and destroys the per-iteration-granularity argument. The system would be
+demonstrating the opposite of its thesis while reporting a healthy number.
+
+**Why log-spaced refinement.** The coarse grid is log-spaced, so the knee is
+located to within a multiplicative factor. Linear refinement around such a
+centre oversamples above it and undersamples below. Measured on the synthetic
+corpus, the spread band is λ∈[40,70] with the best spread at λ=50 (55% largest
+bucket). The coarse grid brackets that band without landing in it — but
+`refine_grid(30)` reaches 42 and 60, and `refine_grid(100)` reaches 50 and 70.
+Log refinement from *either* bracketing point covers the band; linear refinement
+from λ=30 would have topped out at 120 and missed the lower half entirely.
+
+**Why the spread guard warns instead of blocking.** `f1_is_flat()` blocks
+because a flat quality curve means there is genuinely nothing to tune. A
+degenerate spread is different: the λ may be legitimately optimal, and real data
+may spread where synthetic data does not. Blocking would substitute the script's
+judgement for the researcher's on a question — what the experiment should
+demonstrate versus what it costs — that is not the script's to make. So it
+reports both candidates and stops there.
+
+**Rejected.** Optimising directly for spread (it is a property of the figure,
+not of the method — maximising it would be tuning to make the picture look
+good); auto-selecting the best-spread λ (same objection, silently applied);
+widening the grid further (more paid sweep points for resolution that
+refinement already provides).
+
+**Consequences.** The coarse sweep is 7 points instead of 5, and refinement adds
+up to 6 more, so a full sweep costs roughly 2.5× the original. That is the main
+cost driver in Phase 4 and it is deliberate: λ is the one number the whole
+contribution hangs on. Guarded by `tests/test_tune_lambda.py`, which pins the
+half-decade grid spacing, the log-spacing of refinement, and both degeneracy
+checks.
+
+---
+
 ## 6. Traps
 
 Things that will cost you time, in rough order of likelihood.
@@ -559,6 +618,7 @@ Things that will cost you time, in rough order of likelihood.
 | Everything says `$0.00` | `DRY_RUN=1` is still exported | `unset DRY_RUN` |
 | Every CAES query stops at the same iteration | λ is far outside the sensitive region | Check `caes_decisions.jsonl`: if `lambda_times_delta_c` dwarfs `delta_q` everywhere, λ is too high |
 | λ sweep says "DEGENERATE" | F1 flat — usually still in `DRY_RUN` | Run with real responses |
+| λ sweep warns "degenerate on spread" | recommended λ puts >90% of queries in one iteration bucket | Compare against the best-spread λ it names; see **[D-21]** |
 | Coverage all lands in one band | rubric not discriminating | Sharpen `VERIFIER_PROMPT`; this is a Phase 2 blocker, not cosmetic |
 | Ledger seems stuck | it is cumulative and persistent, by design | `python -c "from costs import TRACKER; print(TRACKER.summary())"` |
 

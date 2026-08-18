@@ -6,11 +6,19 @@ price, a model id, or a loop bound.
 from dataclasses import dataclass
 from pathlib import Path
 
-# --- Pricing (USD). VERIFY against https://aws.amazon.com/bedrock/pricing/
-#     before final experiment runs; these change. ---
-PRICE_HAIKU_INPUT_PER_1K   = 0.001    # $1.00 / 1M tokens
-PRICE_HAIKU_OUTPUT_PER_1K  = 0.005    # $5.00 / 1M tokens
-PRICE_TITAN_EMBED_PER_1K   = 0.00011  # $0.11 / 1M tokens
+# --- Pricing (USD), us-east-1 on-demand. VERIFIED 2026-08-16.
+#     Re-check against https://aws.amazon.com/bedrock/pricing/ before the final
+#     experiment runs; every dC number in the paper derives from these three
+#     floats. The AWS pricing page renders its tables in JS, so confirm in the
+#     Bedrock console (Model access -> pricing) rather than by scraping it. ---
+PRICE_HAIKU_INPUT_PER_1K   = 0.001    # $1.00 / 1M tokens  (confirmed 2026-08-16)
+PRICE_HAIKU_OUTPUT_PER_1K  = 0.005    # $5.00 / 1M tokens  (confirmed 2026-08-16)
+
+# CORRECTED 2026-08-16: was 0.00011 ($0.11/1M), which is roughly the price of
+# the PREVIOUS generation -- Titan Embeddings G1 / v1 bill at $0.10/1M. This
+# project uses titan-embed-text-v2:0, which is ~80% cheaper at $0.02/1M.
+# Corroborated by three independent trackers; see CHANGELOG [0.1.1] Task B.
+PRICE_TITAN_EMBED_PER_1K   = 0.00002  # $0.02 / 1M tokens  (v2, NOT v1's $0.10)
 
 # --- Hard spend guards ---
 HARD_BUDGET_USD        = 40.00   # cumulative ceiling; raises BudgetExceeded

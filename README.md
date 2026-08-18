@@ -73,9 +73,11 @@ python -c "from costs import TRACKER; print(TRACKER.summary())"
    * Amazon Titan Text Embeddings V2
 
    Without this, every call fails with `AccessDeniedException`.
-4. **Verify pricing** in `config.py` against
-   <https://aws.amazon.com/bedrock/pricing/> before the final experiment runs.
-   Those constants drive every number in the paper.
+4. **Pricing constants** in `config.py` were verified 2026-08-16
+   (Haiku 4.5 $1/$5 per 1M; Titan Embeddings **V2** $0.02 per 1M — note v1/G1
+   bills 5× that, at $0.10). Re-check before the final runs: those three floats
+   drive every ΔC number in the paper. The AWS pricing page renders its tables
+   in JS, so confirm in the Bedrock console rather than by scraping the page.
 
 ---
 
@@ -106,7 +108,7 @@ DRY_RUN=1 python -m experiments.analyze
 `devdata.py` stamps `data/meta.json` with `"synthetic": true` so synthetic data
 is never mistaken for the real corpus. Delete `data/` before the real ingest.
 
-### 1. Build the index (~$0.50, one time)
+### 1. Build the index (~$0.05, one time)
 
 ```bash
 python ingest.py                        # HotpotQA distractor, 2000 questions
@@ -141,8 +143,8 @@ python -m experiments.run --policy oneshot --n 150 --max-usd 5 --yes
 python tune_lambda.py --yes
 ```
 
-Sweeps λ over `[0.1, 1, 10, 100, 1000]`, then refines around the knee, over the
-**50-question tuning split** — disjoint by construction from the 150-question
+Sweeps λ over `[1, 3, 10, 30, 100, 300, 1000]`, then refines log-spaced around
+the knee, over the **50-question tuning split** — disjoint by construction from the 150-question
 test split (`splits.py` asserts it). Emits `results/lambda_sweep.csv`.
 
 Then **write the chosen value into `config.py`**:
@@ -181,14 +183,19 @@ curl -s localhost:8000/query -H 'content-type: application/json' \
 | Phase | What | Estimated |
 |---|---|---|
 | 0 | Wiring check (`DRY_RUN=1`) | **$0.00** |
-| 1 | Index build (~18k chunks embedded) | ~$0.50 |
+| 1 | Index build (~18k chunks embedded) | ~$0.05 |
 | 2 | Verifier calibration, 30 questions | ~$1 |
 | 3 | Baselines: fixed + one-shot, 150 questions each | ~$2 |
 | 4 | λ sweep on 50 held-out questions | ~$5 |
 | 5 | CAES test run + analysis | ~$15 |
-| | **Projected total** | **~$25** of the $40 ceiling |
+| | **Projected total** | **~$24** of the $40 ceiling |
 
 Re-runs cost far less: the disk cache replays everything already computed.
+
+Embeddings are a rounding error on the query path — about **0.03%** of a
+three-iteration query. ΔC is, in practice, almost entirely the verifier and
+planner LLM calls, which is exactly why the verifier's evidence truncation
+(`VERIFIER_CHUNK_CHARS`) is the main lever on gate overhead.
 
 ---
 

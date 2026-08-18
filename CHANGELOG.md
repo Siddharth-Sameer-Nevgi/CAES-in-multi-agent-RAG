@@ -261,6 +261,88 @@ Built first; nothing else may call Bedrock until this exists.
 
 ---
 
+## [0.1.1] — 2026-08-16
+
+Pre-flight corrections before the first paid run. Both tasks free; no Bedrock
+call made. 75 tests pass (13 new).
+
+### Task A — λ grid resolution
+
+**Problem.** A `DRY_RUN` sweep produced uniform iteration counts at almost every
+λ on the old decade-spaced grid. Only λ≈60 showed spread. At a degenerate λ the
+paper's central figure — CAES spread across 1–5 versus Fixed flat at N —
+collapses to a single bar, which looks identical to a fixed policy.
+
+**Changed**
+- `COARSE_GRID` → `[1, 3, 10, 30, 100, 300, 1000]` (half-decade steps).
+- `refine_grid()` now refines **log-spaced**,
+  `centre × [0.3, 0.5, 0.7, 1.0, 1.4, 2.0, 3.0]`, replacing linear
+  `× [0.25, 0.5, 2.0, 4.0]`.
+
+**Added**
+- `iteration_distribution()`, `format_distribution()`, `max_bucket_share()`,
+  `spread_is_degenerate()`, `best_spread_row()`, `format_row()` in
+  `tune_lambda.py`.
+- `iteration_dist` and `max_bucket_share` columns in
+  `results/lambda_sweep.csv`.
+- Per-λ progress lines now show the spread inline and flag single-bucket λ
+  while the sweep runs, rather than leaving it to be discovered in the CSV.
+- A spread warning at the recommended λ (≥90% in one bucket) that **names the
+  best-spread alternative** with its F1 and cost. Warning only — never exits
+  non-zero, because the λ may be legitimately optimal and real data may spread
+  where synthetic data does not.
+- `tests/test_tune_lambda.py` (13 tests) pinning grid spacing, log-scaling of
+  refinement, distribution accounting, and both degeneracy guards.
+- Decision record **[D-21]** in `DECISIONS.md`, plus a traps-table row.
+
+**Measured on the synthetic corpus (40 questions).** The sensitive band is
+λ∈[40,70], best spread at λ=50 (55% largest bucket):
+
+| λ | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 100 |
+|---|---|---|---|---|---|---|---|---|
+| largest bucket | 100% | 90% | 75% | **55%** | 72% | 92% | 95% | 100% |
+
+The coarse grid brackets the band without landing in it — but `refine_grid(30)`
+reaches 42 and 60, and `refine_grid(100)` reaches 50 and 70. **Log refinement
+from either bracketing coarse point covers the band**; linear refinement from
+λ=30 would have topped out at 120 and missed the lower half entirely. This is
+the concrete justification for the log-spacing change.
+
+**Known limitation, not fixed.** The refinement centre is chosen by
+F1-per-dollar alone. If that heuristic is uninformative — as under `DRY_RUN`,
+where F1 is identically zero and the knee lands at λ=1000 — refinement explores
+the wrong region entirely. The existing `f1_is_flat()` guard catches exactly
+this case and blocks before the recommendation, so the failure is loud rather
+than silent. On real data with a responsive F1 curve the knee should land in a
+sensible region. Worth re-checking after Task E.
+
+### Task B — pricing constants verified
+
+`PRICE_HAIKU_INPUT_PER_1K` and `PRICE_HAIKU_OUTPUT_PER_1K` **confirmed correct**
+at $1.00 / $5.00 per 1M tokens.
+
+**Fixed — `PRICE_TITAN_EMBED_PER_1K` was 5.5× too high.** It read `0.00011`
+($0.11/1M). The actual rate for `amazon.titan-embed-text-v2:0` is **$0.02/1M**
+(`0.00002`). The old value is approximately the *previous generation's* price —
+Titan Embeddings G1 / v1 bill at $0.10/1M — so this looks like a v1 figure
+carried into a v2 config. Corroborated across three independent trackers.
+
+**Impact.**
+- Phase 1 ingest: ~$0.21 → **~$0.04** for ~1.9M tokens.
+- Per-query ΔC: **negligible.** Embeddings are ~0.03% of a three-iteration
+  query; the verifier LLM call dominates at ~$0.00145 each. ΔC is in practice
+  almost entirely verifier and planner calls, which is why
+  `VERIFIER_CHUNK_CHARS` is the real lever on gate overhead.
+
+No previously-recorded spend is affected — the ledger is empty and no paid call
+has ever been made.
+
+**Also updated.** `config.py` carries the verification date, the source note,
+and an explicit warning about the v1/v2 confusion. README cost table, Phase 1
+estimate, prerequisites, and the λ-grid description brought in line.
+
+---
+
 ## Unreleased / next
 
 Nothing is committed to these; they are the open items at the time of writing.
