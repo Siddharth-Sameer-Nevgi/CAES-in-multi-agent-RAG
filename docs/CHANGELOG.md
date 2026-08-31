@@ -639,3 +639,62 @@ inside a single day's quota.
 - The ledger/[D-22] discrepancy, still open question 6.
 
 ---
+
+## [0.3.1] — 2026-08-31
+
+Pre-ingest hardening. Three defects found by rehearsing Task 4 rather than
+starting it — each would have surfaced partway into a multi-day run.
+
+### Fixed
+
+- **`load_dataset("hotpot_qa", ...)` no longer works.** `datasets` 3.0 removed
+  script-based dataset loading and 5.x rejects bare repo ids outright
+  (*"Repository id must be 'namespace/name'"*). Installed here is 5.0.1, so
+  ingest would have failed on its first call, before a single embedding.
+  Corrected to the namespaced `hotpotqa/hotpot_qa`, which works on old and new
+  versions alike. Schema verified unchanged against 5.0.1:
+  `context.{title,sentences}`, `supporting_facts.{title,sent_id}`.
+- **A resumed ingest re-issued its batched `countTokens` requests.** Ingest
+  spans ~6 days of free-tier quota and is therefore restarted repeatedly; the
+  embeddings themselves replayed from cache correctly, but the per-batch token
+  counts did not, burning ~112 requests of each day's allowance on finished
+  work. Batch counts are now cached by batch contents like any other provider
+  call. Verified: a second pass issues **zero** new requests, returns identical
+  vectors, and reports an identical token total.
+- **`count_tokens` ignored `DRY_RUN`.** Every other network path is exercisable
+  for $0.00; this one raised on the missing API key, which meant a multi-day
+  ingest could not be rehearsed before being committed to. That is how the
+  resume bug above stayed hidden.
+
+### Measured, replacing estimates
+
+Corpus built for real (free — no API key needed, dataset processing only):
+
+| | Estimated | **Actual** |
+|---|---:|---:|
+| Chunks (500 questions) | 4,500 | **5,552** |
+| Chunks per question | 9.0 | **11.1** |
+| Embedding requests | 4,590 | **5,664** |
+| Ingest days at 1,000/day | 4.6 | **5.7** |
+| Ingest cost (notional) | — | **~$0.12** |
+
+### Added
+
+- Two regression tests: a resumed ingest issues no new provider requests, and
+  `count_tokens` works under `DRY_RUN`.
+- The preflight verifies batched `countTokens` before ingest depends on it.
+
+### Verified live
+
+`python -m llm --check` against `gemini-3.5-flash-lite`:
+
+- `temperature=0.0` accepted; **1 output token** for a one-word reply, so
+  thinking is confirmed off and omitting the field was correct.
+- Embedding dimension **768**, L2 norm `1.000000` after re-normalisation.
+- Batched `countTokens` **exact**: 12 for three texts, `[4, 4, 4]` individually.
+- **[D-12] confirmed against the live API**: a repeated call returned
+  `notional $0.00000430 / actual $0.00000000` with the ledger unmoved — a cache
+  hit accruing notional cost while recording nothing to the ledger, which is
+  the behaviour the gate's cache-neutrality depends on.
+
+---

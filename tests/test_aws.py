@@ -179,3 +179,53 @@ def _parse(argv):
     finally:
         argparse.ArgumentParser.parse_args = real
     return captured["ns"]
+
+
+# ---------------------------------------------------------------------------
+# Ingest resume — a multi-day free-tier ingest is restarted many times
+# ---------------------------------------------------------------------------
+
+def test_ingest_resume_costs_no_quota(monkeypatch, tmp_path):
+    """Ingest spans days on a free-tier quota, so it is resumed repeatedly.
+
+    A resume must issue NO new provider requests for chunks already embedded --
+    including the batched countTokens calls, which are easy to forget and would
+    otherwise burn ~112 requests of the daily allowance on finished work.
+    """
+    import numpy as np
+
+    import cache as cache_mod
+    import ingest
+    import llm as llm_mod
+
+    disk = cache_mod.DiskCache(tmp_path / "cache")
+    monkeypatch.setattr(llm_mod, "CACHE", disk)
+    monkeypatch.setattr(llm_mod, "DRY_RUN", True)
+
+    chunks = [{"chunk_id": str(i), "title": f"T{i}", "part": 0,
+               "text": f"Title {i}: passage body number {i} with some words."}
+              for i in range(120)]
+
+    first_vecs, first_tokens = ingest.embed_chunks(chunks, batch=50)
+    writes_after_first = disk.stats()["writes"]
+    assert writes_after_first > 0
+
+    second_vecs, second_tokens = ingest.embed_chunks(chunks, batch=50)
+    assert disk.stats()["writes"] == writes_after_first, \
+        "a resumed ingest re-issued provider requests for finished work"
+    assert second_tokens == first_tokens, "the token total drifted across resume"
+    assert np.array_equal(first_vecs, second_vecs), \
+        "a resumed ingest produced different vectors"
+
+
+def test_count_tokens_is_free_under_dry_run(monkeypatch):
+    """Every network path must be exercisable for $0.00, or a multi-day ingest
+    cannot be rehearsed before it is committed to."""
+    import config as config_mod
+    import llm as llm_mod
+    from tests.conftest import _select_provider
+
+    _select_provider(monkeypatch, "gemini")
+    monkeypatch.setattr(llm_mod, "DRY_RUN", True)
+    monkeypatch.delenv(config_mod.GEMINI_API_KEY_ENV, raising=False)
+    assert llm_mod.count_tokens(["some text", "more text"]) > 0

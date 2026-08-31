@@ -458,6 +458,10 @@ def count_tokens(texts: list[str], model: str | None = None) -> int:
     """
     if config.PROVIDER != "gemini":
         raise NotImplementedError("count_tokens is a Gemini-only helper")
+    if DRY_RUN:
+        # Every other network path is exercisable for $0.00; this one must be
+        # too, or a multi-day ingest cannot be rehearsed before it is started.
+        return sum(_estimate_tokens(t) for t in texts)
     model = model or config.MODEL_EMBED
     payload = _gemini_post(
         "countTokens", model,

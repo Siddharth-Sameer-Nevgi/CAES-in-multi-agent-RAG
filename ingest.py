@@ -48,11 +48,19 @@ def chunk_text(text: str, size: int = CHUNK_WORDS,
     return out
 
 
+# Namespaced repo id. `datasets` 3.0 removed script-based dataset loading and
+# 5.x rejects bare ids outright ("Repository id must be 'namespace/name'"), so
+# the old "hotpot_qa" fails immediately. Namespaced ids work on old and new
+# versions alike. Verified against datasets 5.0.1 on 2026-08-31; the schema is
+# unchanged (context.{title,sentences}, supporting_facts.{title,sent_id}).
+HOTPOTQA_REPO = "hotpotqa/hotpot_qa"
+
+
 def load_hotpotqa(sample_size: int, seed: int):
     from datasets import load_dataset
 
-    log.info("Loading hotpot_qa/distractor validation split...")
-    ds = load_dataset("hotpot_qa", "distractor", split="validation")
+    log.info("Loading %s/distractor validation split...", HOTPOTQA_REPO)
+    ds = load_dataset(HOTPOTQA_REPO, "distractor", split="validation")
     idx = list(range(len(ds)))
     random.Random(seed).shuffle(idx)
     return ds.select(idx[:sample_size])
@@ -119,6 +127,8 @@ def embed_chunks(chunks: list[dict],
         def tqdm(x, **kw):
             return x
 
+    from cache import CACHE, make_key
+
     vecs = np.zeros((len(chunks), config.EMBED_DIM), dtype="float32")
     total_tokens = 0
     for start in tqdm(range(0, len(chunks), batch), desc="embedding",
@@ -126,7 +136,7 @@ def embed_chunks(chunks: list[dict],
         window = chunks[start:start + batch]
         texts = [c["text"] for c in window]
         if config.PROVIDER == "gemini":
-            total_tokens += llm.count_tokens(texts)
+            total_tokens += _batch_token_count(texts, CACHE, make_key)
             vecs[start:start + len(window)] = llm.embed(
                 texts, policy="ingest", measure_tokens=False)
         else:
@@ -136,6 +146,26 @@ def embed_chunks(chunks: list[dict],
             vecs[start:start + len(window)] = block
             total_tokens = 0        # summed from the ledger instead
     return vecs, total_tokens
+
+
+def _batch_token_count(texts: list[str], cache, make_key) -> int:
+    """Exact token total for one batch, cached like any other provider call.
+
+    Ingest spans several days on a free-tier quota, so it is resumed repeatedly.
+    Without this cache every resume would re-issue one countTokens request per
+    batch for work already done -- ~112 requests of the daily allowance burned
+    on nothing. Keyed by the batch contents, so it is correct across resumes
+    and invalidated by any change to the chunking.
+    """
+    import llm
+
+    key = make_key(f"countTokens:{config.MODEL_EMBED}", {"texts": texts})
+    hit = cache.get(key)
+    if hit is not None:
+        return int(hit["tokens"])
+    n = llm.count_tokens(texts)
+    cache.set(key, {"tokens": n})
+    return n
 
 
 def build_index(vectors: np.ndarray):
