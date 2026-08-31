@@ -2,11 +2,22 @@
 
     python calibrate_verifier.py --n 30
 
-Two blockers, both checked here:
-  1. Valid JSON on every sampled question (target 30/30).
-  2. Coverage scores spread across the range. If everything lands in a narrow
-     band the verifier carries no information, dQ is noise, and the whole
-     method fails. Sharpen the rubric in agents/prompts.py before proceeding.
+Two phases:
+
+  A. Iteration-1 marginal -- JSON validity, and the spread of coverage over a
+     single retrieval. Cheap, and it catches a verifier that emits one number.
+
+  B. Coverage TRAJECTORIES over MAX_ITERATIONS. This is the phase that matters.
+     dQ is a *difference across iterations*, so a marginal distribution cannot
+     establish it: a verifier that says 1.0 on easy questions at iteration 1
+     and 0.2 on hard ones, then climbs to 1.0 on the hard ones by iteration 3,
+     is exactly the signal the gate needs -- and phase A alone reads that as
+     "top-heavy and therefore flat". Phase B measures whether coverage RISES
+     and FLATTENS, which is the diminishing-returns premise the method rests on
+     (METHODOLOGY 3.1).
+
+Pass on phase A alone is not sufficient, and failing A while passing B is
+informative rather than fatal -- see the verdict text.
 
 Costs roughly $1 at n=30. Runs against the tuning split so the test set stays
 untouched.
@@ -28,6 +39,10 @@ MIN_STDEV = 0.12
 MIN_RANGE = 0.40
 MAX_SINGLE_BIN_SHARE = 0.60
 
+# Trajectory criteria (phase B). dQ needs coverage to actually move.
+MIN_TOTAL_RISE = 0.05      # mean coverage must climb this much from it1 to itN
+MIN_MOVING_SHARE = 0.25    # fraction of queries whose coverage rises at all
+
 
 def histogram(values: list[float], width: float = 0.1) -> dict[str, int]:
     bins: dict[str, int] = {}
@@ -46,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n", type=int, default=30)
     ap.add_argument("--k", type=int, default=config.TOP_K)
     ap.add_argument("--max-usd", type=float, default=2.0)
+    ap.add_argument("--traj-n", type=int, default=15,
+                    help="questions to run full trajectories for (phase B)")
+    ap.add_argument("--no-trajectories", dest="trajectories",
+                    action="store_false",
+                    help="skip phase B (phase A alone cannot establish dQ)")
     args = ap.parse_args(argv)
 
     from agents.verifier import verify
@@ -94,6 +114,49 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{chr(10)}DAILY QUOTA SPENT after {len(results)}/"
               f"{len(questions)} questions: {exc}", file=sys.stderr)
 
+    # ---------------- phase B: trajectories ----------------
+    trajectories = []
+    if not quota_spent and args.trajectories:
+        from graph import run_query, state_summary
+        from policies import FixedPolicy
+
+        print()
+        print(f"--- phase B: coverage trajectories over "
+              f"{config.MAX_ITERATIONS} iterations ---")
+        # FixedPolicy runs to a fixed depth regardless of the gate, which is
+        # what we want: the trajectory must be observed to its end, not cut
+        # short by the very rule being calibrated.
+        pol = FixedPolicy(n=config.MAX_ITERATIONS)
+        try:
+            with TRACKER.run_budget(args.max_usd, name="calibrate-traj"):
+                for i, q in enumerate(questions[:args.traj_n], 1):
+                    final = run_query(q["question"], pol, query_id=q["id"],
+                                      gold_titles=q.get("supporting_titles"))
+                    summ = state_summary(final)
+                    trajectories.append({
+                        "id": q["id"],
+                        "question": q["question"],
+                        "coverage_history": summ["coverage_history"],
+                        "gold_recall_history": summ["gold_recall_history"],
+                        "cost_history": summ["cost_history"],
+                    })
+                    cov = summ["coverage_history"]
+                    print(f"[{i:>3}/{min(args.traj_n, len(questions))}] "
+                          + " -> ".join(f"{c:.2f}" for c in cov)
+                          + f"   {q['question'][:46]}")
+        except llm_mod.QuotaExhausted as exc:
+            quota_spent = True
+            print(file=sys.stderr)
+            print(f"DAILY QUOTA SPENT during trajectories after "
+                  f"{len(trajectories)} questions: {exc}", file=sys.stderr)
+
+    if trajectories:
+        traj_out = config.RESULTS_DIR / "verifier_trajectories.jsonl"
+        with traj_out.open("w", encoding="utf-8") as fh:
+            for t in trajectories:
+                fh.write(json.dumps(t) + chr(10))
+        print(f"trajectories -> {traj_out}")
+
     out = config.RESULTS_DIR / "verifier_calibration.jsonl"
     with out.open("w", encoding="utf-8") as fh:
         for r in results:
@@ -132,6 +195,58 @@ def main(argv: list[str] | None = None) -> int:
     print(f"spend         : ${TRACKER.cumulative():.4f} cumulative")
     print("=" * 62)
 
+    # ---------------- phase B report ----------------
+    traj_rise = None
+    traj_moving = None
+    if trajectories:
+        depth = max(len(t["coverage_history"]) for t in trajectories)
+        print()
+        print("=" * 62)
+        print(f"TRAJECTORIES  (n={len(trajectories)}, depth={depth})")
+        print()
+        print("mean coverage per iteration -- the diminishing-returns premise:")
+        means = []
+        for it in range(depth):
+            vals = [t["coverage_history"][it] for t in trajectories
+                    if len(t["coverage_history"]) > it]
+            m = statistics.mean(vals)
+            means.append(m)
+            delta = "" if it == 0 else f"   dQ_obs {m - means[it - 1]:+.3f}"
+            bar = "#" * int(round(m * 40))
+            print(f"  it{it + 1}  {m:.3f}  {bar}{delta}")
+        traj_rise = means[-1] - means[0]
+        print()
+        print(f"  total rise it1 -> it{depth}: {traj_rise:+.3f}")
+
+        gains = [max(t["coverage_history"]) - t["coverage_history"][0]
+                 for t in trajectories]
+        n_moving = sum(1 for g in gains if g > 0.01)
+        traj_moving = n_moving / len(gains)
+        print(f"  queries whose coverage moves at all: "
+              f"{n_moving}/{len(gains)} ({traj_moving:.0%})")
+
+        print()
+        print("sample trajectories (raw, then running-max smoothed):")
+        for t in trajectories[:5]:
+            raw = t["coverage_history"]
+            sm, run = [], 0.0
+            for c in raw:
+                run = max(run, c)
+                sm.append(run)
+            print("  raw    " + " ".join(f"{c:.2f}" for c in raw)
+                  + f"   {t['question'][:40]}")
+            print("  smooth " + " ".join(f"{c:.2f}" for c in sm))
+
+        # Gate overhead: what fraction of a query's spend is the verifier.
+        by_type = TRACKER.summary()["by_call_type"]
+        verify_usd = by_type.get("verify", {}).get("usd", 0.0)
+        total_usd = sum(v["usd"] for v in by_type.values())
+        if total_usd:
+            print()
+            print(f"gate overhead: verifier is {verify_usd / total_usd:.0%} of "
+                  f"all spend (${verify_usd:.4f} of ${total_usd:.4f})")
+        print("=" * 62)
+
     failures = []
     if n_ok < len(results):
         failures.append(f"{len(results) - n_ok} response(s) failed to parse")
@@ -142,16 +257,63 @@ def main(argv: list[str] | None = None) -> int:
     if top_share > MAX_SINGLE_BIN_SHARE:
         failures.append(f"{top_share:.0%} of scores in the single bin {top_bin}")
 
-    if failures:
-        print("\nBLOCKED. The verifier is not yet a usable dQ signal:")
-        for f in failures:
+    traj_failures = []
+    if trajectories:
+        if traj_rise is not None and traj_rise < MIN_TOTAL_RISE:
+            traj_failures.append(
+                f"mean coverage rises only {traj_rise:+.3f} across iterations "
+                f"(need {MIN_TOTAL_RISE:+.2f}) -- dQ has nothing to extrapolate")
+        if traj_moving is not None and traj_moving < MIN_MOVING_SHARE:
+            traj_failures.append(
+                f"only {traj_moving:.0%} of queries move at all "
+                f"(need {MIN_MOVING_SHARE:.0%})")
+
+    print()
+    if not failures and not traj_failures:
+        print("PASS. Coverage is spread, it rises with retrieval, and parsing "
+              "is clean; proceed to Phase 3.")
+        return 0
+
+    if traj_failures:
+        print("BLOCKED on TRAJECTORIES. Coverage does not respond to further "
+              "retrieval:")
+        for f in traj_failures:
             print(f"  - {f}")
-        print("\nSharpen the rubric in agents/prompts.py (VERIFIER_PROMPT) and "
-              "re-run.\nDo not proceed to Phase 3 on a flat coverage signal.")
+        print()
+        print("This is the fatal one. If more retrieval does not raise "
+              "coverage, there")
+        print("is no marginal quality to trade against cost, and the gate has "
+              "nothing")
+        print("to decide. Check the gold_recall line first: if retrieval is "
+              "already")
+        print("saturated at iteration 1, the corpus is too easy and the rubric "
+              "is NOT")
+        print("the problem -- see DECISIONS [D-25].")
         return 1
 
-    print("\nPASS. Coverage is spread and parsing is clean; proceed to Phase 3.")
-    return 0
+    print("BLOCKED on the ITERATION-1 MARGINAL:")
+    for f in failures:
+        print(f"  - {f}")
+    if trajectories:
+        print()
+        print(f"But TRAJECTORIES PASSED: mean coverage rises {traj_rise:+.3f} "
+              f"and {traj_moving:.0%} of queries move.")
+        print("A top-heavy marginal with a healthy trajectory means many "
+              "questions are")
+        print("simply easy at iteration 1 -- not that the verifier is blunt. "
+              "Check the")
+        print("gold_recall line before touching VERIFIER_PROMPT: sharpening a "
+              "rubric")
+        print("that is already correct damages a working instrument. See "
+              "DECISIONS [D-25].")
+    else:
+        print()
+        print("Trajectories were NOT measured, so this verdict rests on a "
+              "marginal")
+        print("distribution alone, which cannot establish dQ. Re-run without "
+              "--no-trajectories")
+        print("before acting on it.")
+    return 1
 
 
 if __name__ == "__main__":
