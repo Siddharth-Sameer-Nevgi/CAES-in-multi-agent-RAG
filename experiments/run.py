@@ -27,14 +27,22 @@ EST_USD_PER_ITERATION = 0.0015
 EST_USD_PER_GENERATION = 0.0010
 
 
-def raw_path(policy: str, split: str = "test") -> Path:
-    """Output path, namespaced by split.
+def raw_path(policy: str, split: str = "test", lam: float | None = None) -> Path:
+    """Output path, namespaced by split and by any lambda override.
 
     The test split keeps the bare name so existing artifacts and the analysis
     step are unaffected; any other split is suffixed, so tune-split results can
     never be silently read as test results.
+
+    `--lam` is namespaced too. Diagnostic runs at different lambda on the same
+    split are the normal way to inspect the cost/quality curve, and without
+    this they collide: the second run refuses to start because the first one's
+    file exists, which reads as a tooling error rather than the name clash it
+    is. A frozen config.LAMBDA passes lam=None and keeps the plain name.
     """
     stem = policy if split == "test" else f"{policy}_{split}"
+    if lam is not None:
+        stem = f"{stem}_lam{lam:g}"
     return config.RESULTS_DIR / f"{stem}_raw.jsonl"
 
 
@@ -113,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     from splits import test_set, tune_set
 
     questions = (tune_set() if args.split == "tune" else test_set())[:args.n]
-    out_path = args.out or raw_path(args.policy, args.split)
+    out_path = args.out or raw_path(args.policy, args.split, args.lam)
 
     completed = load_completed(out_path) if args.resume else {}
     if not args.resume and out_path.exists():

@@ -217,6 +217,12 @@ def test_run_driver_split_selection_is_explicit_and_namespaced():
     assert raw_path("fixed", "tune").name == "fixed_tune_raw.jsonl"
     assert raw_path("fixed", "test") != raw_path("fixed", "tune")
 
+    # Diagnostic runs at different lambda must not collide with each other.
+    assert raw_path("caes", "tune", 1000).name == "caes_tune_lam1000_raw.jsonl"
+    assert raw_path("caes", "tune", 3000) != raw_path("caes", "tune", 1000)
+    # A frozen config.LAMBDA (no override) keeps the plain name.
+    assert raw_path("caes", "test", None).name == "caes_raw.jsonl"
+
 
 def test_splits_are_disjoint_and_correctly_sized():
     from splits import test_set, tune_set
