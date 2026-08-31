@@ -547,3 +547,95 @@ the six layers still run on AWS at zero cost, and now demonstrably do.
   persistent resource in the account, and not something to create unasked.
 
 ---
+
+## [0.3.0] — 2026-08-31
+
+**Free-tier daily quotas turned out to be the binding constraint, and they set
+the experiment's scale.** Rationale in [DECISIONS.md](DECISIONS.md) **[D-24]**.
+
+Still no paid call. Ingest, calibration, λ tuning and the experiments remain
+ahead — but they are now feasible, which they were not this morning.
+
+### The finding
+
+Quotas read off `aistudio.google.com/rate-limit`:
+
+| Model | RPM | TPM | RPD |
+|---|---|---|---|
+| `gemini-2.5-flash` | 5 | 250K | **20** |
+| `gemini-3.5-flash-lite` | 15 | 250K | **500** |
+| `gemini-embedding-001` | 100 | 30K | **1,000** |
+
+**Requests per day, not per minute, is the wall.** At 20 RPD the ~7,200-call
+experiment needs 360 days. Pacing cannot help — the limit is how many times you
+ask, not how fast.
+
+### Changed
+
+- **LLM: `gemini-2.5-flash` → `gemini-3.5-flash-lite`.** Same list price
+  ($0.30/$2.50 per 1M), **25× the daily requests**. Experiment drops 360 days →
+  ~15. Chosen for quota, not cost; the cost of the choice is that "Lite" is a
+  weaker verifier, and the verifier is the instrument.
+- **`CORPUS_SAMPLE_SIZE` 2000 → 500.** Ingest embeds the corpus up front against
+  a separate 1,000/day quota: 18k chunks (~36k requests with [D-23]'s
+  `countTokens`) is 36 days; 4.5k chunks is ~9.
+
+  **This is a research change.** The evaluation split is untouched — still 50
+  tune + 150 test — but the *distractor pool* is four times thinner, so
+  retrieval is easier and **absolute F1 will read high against published
+  HotpotQA baselines**. It inflates F1 for all three arms identically, so the
+  relative claim survives; external validity does not. Recorded in
+  METHODOLOGY §10 (External).
+- **Pacer split per model.** `GEMINI_MAX_RPM` was one shared 15 — 3× the LLM's
+  real limit and a sixth of the embedding model's. The two draw on separate
+  quota buckets, so a shared pacer necessarily overran one or throttled the
+  other. Now `GEMINI_LLM_RPM` / `GEMINI_EMBED_RPM`, tracked separately.
+- **Thinking control keyed by model.** 2.5 disables thinking with
+  `thinkingConfig.thinkingBudget`; 3.x moved to `thinkingLevel`. Sending the
+  wrong field is a 400 on *every* call. `GEMINI_THINKING_CONFIG` maps 3.x Lite
+  models to `None` (send nothing — thinking is off by default there). That is an
+  assumption about a default, so it is verified rather than trusted: the
+  preflight now reports output tokens for a one-word reply, and any non-zero
+  `thoughtsTokenCount` is still folded into output so unexpected thinking shows
+  up as measured cost rather than an understated ΔC.
+
+### Added
+
+- **`llm.QuotaExhausted`** — raised on a 429 whose `QuotaFailure.quotaId` names a
+  per-day limit, or whose `retryDelay` exceeds five minutes. **Deliberately not
+  retried:** a per-minute limit clears in seconds, a per-day limit does not clear
+  until tomorrow, and spending five backoff attempts on it teaches nothing.
+- **Clean resume paths.** `ingest.py`, `experiments/run.py` and
+  `calibrate_verifier.py` each catch it and exit with resume instructions
+  instead of a stack trace. Nothing is lost: the disk cache already makes
+  completed work free to replay, so a resumed run spends quota only on new work
+  — the cache earning its keep for a reason [D-12] never anticipated.
+  `calibrate_verifier` explicitly refuses to *judge* the instrument on a
+  truncated sample, since its pass criteria are distributional.
+- **Pre-flight feasibility warning** in `experiments/run.py`: projected request
+  count and day count against the daily cap, printed before the run starts.
+- Six tests: per-model pacing buckets, per-day vs per-minute 429
+  discrimination, `QuotaExhausted` not being retried, thinking-config matching
+  the model family, every configured model having an explicit thinking decision,
+  and a refusal to run a model whose RPM has not been read off the dashboard.
+
+### Verified
+
+- 127 tests pass (was 123) on both providers; `DRY_RUN=1 python -m smoke` still
+  reports `$0.00` with the ledger unmoved.
+
+### Corrections to the previous estimate
+
+`calibrate_verifier` runs **one** verify per question, not one per iteration, so
+Task 5 is ~30 LLM calls rather than the 300 previously projected — comfortably
+inside a single day's quota.
+
+### Still open
+
+- **Whether `gemini-3.5-flash-lite` accepts the request as shaped.** No real
+  call has been made against it. `python -m llm --check` settles it.
+- **Whether it discriminates coverage.** Task 5 is the go/no-go, and it matters
+  more after a model change, not less.
+- The ledger/[D-22] discrepancy, still open question 6.
+
+---

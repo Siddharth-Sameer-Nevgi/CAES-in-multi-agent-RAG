@@ -69,7 +69,16 @@ BEDROCK_EMBED_DIM   = 1024      # titan-embed-text-v2 default output dimension
 # under "Previous models / Shut down"; text-embedding-004 is gone entirely).
 # These are their nearest live equivalents in the same tier. Confirmed against
 # https://ai.google.dev/gemini-api/docs/models on 2026-08-31.
-GEMINI_MODEL_LLM    = "gemini-2.5-flash"
+# gemini-3.5-flash-lite is chosen for its FREE-TIER QUOTA, not its price: it
+# lists at the same $0.30/$2.50 per 1M as gemini-2.5-flash but allows 500
+# requests/day against 2.5-flash's 20. At 20 RPD the full experiment needs 375
+# days; at 500 it needs 15. See DECISIONS [D-24].
+#
+# The cost of the choice is that "Lite" is a weaker verifier, and the verifier
+# is the instrument (METHODOLOGY 6). Task 5 calibration is the test of whether
+# it discriminates coverage into usable bands; if it does not, revisit this
+# line before anything else.
+GEMINI_MODEL_LLM    = "gemini-3.5-flash-lite"
 GEMINI_MODEL_EMBED  = "gemini-embedding-001"
 
 # gemini-embedding-001 returns 3072 dimensions by default and supports
@@ -88,13 +97,25 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
 GEMINI_TIMEOUT_S = 120
 
-# gemini-2.5-flash has thinking ON by default, and thinking tokens bill as
-# output. Left on they would inflate dC, and their variable length undermines
-# the determinism [D-19] relies on for cache correctness. Disabled explicitly.
-# thoughtsTokenCount is still folded into the output count if it ever comes
-# back non-zero, so an ignored budget surfaces as cost rather than as an
-# understated dC.
-GEMINI_THINKING_BUDGET = 0
+# Thinking tokens bill as output, so left unchecked they inflate dC, and their
+# variable length undermines the determinism [D-19] needs for cache
+# correctness. How you turn thinking off is MODEL-DEPENDENT: the 2.5 family
+# takes generationConfig.thinkingConfig.thinkingBudget, while the 3.x family
+# moved to thinkingLevel. Sending the wrong field is a 400 that would fail
+# every call, so this is keyed by model rather than assumed.
+#
+# A model mapped to None sends no thinking field at all -- correct for the
+# 3.x Lite models, which have thinking off by default. That is an assumption
+# about a default rather than an instruction, so it is verified rather than
+# trusted: `python -m llm --check` reports thoughtsTokenCount explicitly, and
+# _parse_llm folds any non-zero count into output tokens so unexpected
+# thinking shows up as measured cost rather than as an understated dC.
+GEMINI_THINKING_CONFIG = {
+    "gemini-2.5-flash":      {"thinkingBudget": 0},
+    "gemini-2.5-flash-lite": {"thinkingBudget": 0},
+    "gemini-3.5-flash-lite": None,
+    "gemini-3.5-flash":      None,
+}
 
 # Client-side pacer, per model class. Limits are per-account and visible only
 # at aistudio.google.com/rate-limit, so these mirror one account's observed
@@ -102,20 +123,21 @@ GEMINI_THINKING_BUDGET = 0
 # retried with the server-supplied retryDelay regardless.
 #
 # READ FROM THE DASHBOARD 2026-08-31, free tier:
-#   gemini-2.5-flash      5 RPM / 250K TPM /    20 RPD
-#   gemini-embedding-001  100 RPM / 30K TPM / 1,000 RPD
+#   gemini-2.5-flash        5 RPM / 250K TPM /    20 RPD
+#   gemini-3.5-flash-lite  15 RPM / 250K TPM /   500 RPD  <- in use
+#   gemini-embedding-001  100 RPM /  30K TPM / 1,000 RPD
 # The single shared value this replaced was 15 -- three times the LLM's actual
 # limit, and a sixth of the embedding model's. Paced separately now.
 #
 # RPD, not RPM, is the binding constraint on the free tier: 20 LLM requests a
 # day is roughly three questions. See DECISIONS [D-24].
-GEMINI_LLM_RPM   = 5
+GEMINI_LLM_RPM   = 15
 GEMINI_EMBED_RPM = 100
 
 # Daily request ceilings, for pre-flight feasibility warnings only. These are
 # NOT enforced -- the server enforces them; we surface them so a run that
 # cannot possibly finish says so before it starts. 0 means "no known limit".
-GEMINI_LLM_RPD   = 20
+GEMINI_LLM_RPD   = 500
 GEMINI_EMBED_RPD = 1000
 
 # gemini-embedding-001's :embedContent response carries no token count, so the
@@ -157,7 +179,17 @@ VERIFIER_CHUNK_CHARS = 600    # ~150 tokens per chunk of truncated evidence
 CLOUDWATCH_NAMESPACE = "CAES-RAG"
 
 # --- Dataset splits (deterministic, disjoint) ---
-CORPUS_SAMPLE_SIZE = 2000
+# REDUCED from 2000 on 2026-08-31. Ingest embeds the whole corpus up front
+# against a 1,000/day embedding quota: 2000 questions is ~18k chunks, so ~36
+# days of ingest for a 15-day experiment. 500 questions is ~4.5k chunks, ~9
+# days, and still yields the full 50 tune + 150 test evaluation split -- what
+# shrinks is the DISTRACTOR POOL, not the question count.
+#
+# This is a research change, not a tuning knob: a thinner distractor pool makes
+# retrieval easier and inflates F1. It inflates it for all three arms equally,
+# so the comparison stays valid, but external validity does not -- recorded in
+# METHODOLOGY 10 (External) and DECISIONS [D-24].
+CORPUS_SAMPLE_SIZE = 500
 SPLIT_SEED   = 20240917
 N_TUNE       = 50     # held-out lambda-tuning questions
 N_TEST       = 150    # evaluation questions, disjoint from tuning

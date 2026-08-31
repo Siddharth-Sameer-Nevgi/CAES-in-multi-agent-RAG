@@ -58,6 +58,17 @@ _RETRYABLE_BEDROCK = ("ThrottlingException", "TooManyRequestsException",
 _RETRYABLE_HTTP = (429, 500, 502, 503, 504)
 
 
+class QuotaExhausted(RuntimeError):
+    """The provider's DAILY request quota is spent.
+
+    Distinct from an ordinary 429: a per-minute limit clears in seconds and is
+    worth retrying, a per-day limit does not clear until tomorrow and retrying
+    only burns time. Callers catch this to exit cleanly with resume
+    instructions -- the disk cache preserves everything already computed, so
+    resuming tomorrow re-does no work and spends no quota on it.
+    """
+
+
 @dataclass
 class LLMResponse:
     text: str
@@ -212,6 +223,31 @@ def _retry_delay_seconds(payload: dict[str, Any]) -> float | None:
     return None
 
 
+# A per-day quota id looks like
+# "GenerateRequestsPerDayPerProjectPerModel-FreeTier"; the per-minute sibling
+# says PerMinute. Matching on the substring keeps this robust to the rest of
+# the id changing.
+_PER_DAY_MARKERS = ("perday", "per_day", "requestsperday")
+
+
+def _is_daily_quota_failure(payload: dict[str, Any]) -> bool:
+    """True if a 429 is the DAILY cap rather than the per-minute one.
+
+    Retrying a per-minute limit works; retrying a per-day limit just burns the
+    backoff schedule and then fails anyway. A very long server-supplied
+    retryDelay is treated as the same signal, since no per-minute limit asks
+    you to wait an hour.
+    """
+    for detail in payload.get("error", {}).get("details", []) or []:
+        for violation in detail.get("violations", []) or []:
+            blob = (str(violation.get("quotaId", ""))
+                    + str(violation.get("quotaMetric", ""))).lower()
+            if any(m in blob for m in _PER_DAY_MARKERS):
+                return True
+    delay = _retry_delay_seconds(payload)
+    return delay is not None and delay > 300.0
+
+
 def _gemini_post(method: str, model: str, body: dict[str, Any]) -> dict[str, Any]:
     """POST to `{base}/models/{model}:{method}` with retry and backoff.
 
@@ -251,6 +287,13 @@ def _gemini_post(method: str, model: str, body: dict[str, Any]) -> dict[str, Any
             payload = {}
         message = payload.get("error", {}).get("message", resp.text[:300])
 
+        if resp.status_code == 429 and _is_daily_quota_failure(payload):
+            raise QuotaExhausted(
+                f"Daily quota for {model} is spent: {message}. Nothing is "
+                f"lost -- every completed call is cached, so re-running "
+                f"tomorrow resumes from here for free."
+            )
+
         if resp.status_code not in _RETRYABLE_HTTP or attempt == _MAX_RETRIES - 1:
             raise RuntimeError(
                 f"Gemini {method} on {model} failed with HTTP "
@@ -276,17 +319,23 @@ def _gemini_post(method: str, model: str, body: dict[str, Any]) -> dict[str, Any
 def _build_llm_body(prompt: str, system: str | None, max_tokens: int,
                     temperature: float) -> dict[str, Any]:
     if config.PROVIDER == "gemini":
+        generation_config: dict[str, Any] = {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        }
+        # Thinking tokens bill as output and vary in length, which would both
+        # inflate dC and break the determinism the cache key assumes. How to
+        # switch it off differs across model families, so it is looked up
+        # rather than assumed; None means "send no thinking field", which is
+        # correct for models that have it off by default. See
+        # config.GEMINI_THINKING_CONFIG.
+        thinking = config.GEMINI_THINKING_CONFIG.get(config.MODEL_LLM)
+        if thinking:
+            generation_config["thinkingConfig"] = dict(thinking)
+
         body: dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-                # Thinking tokens bill as output and vary in length, which
-                # would both inflate dC and break the determinism the cache
-                # key assumes. See config.GEMINI_THINKING_BUDGET.
-                "thinkingConfig": {
-                    "thinkingBudget": config.GEMINI_THINKING_BUDGET},
-            },
+            "generationConfig": generation_config,
         }
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}

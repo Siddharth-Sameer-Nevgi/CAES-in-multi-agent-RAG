@@ -340,9 +340,24 @@ happened, not merely that costs differed.
 **External.**
 
 * Single dataset (HotpotQA), single retrieval architecture (dense, flat index,
-  fixed top-k), single model (`gemini-2.5-flash`, with `gemini-embedding-001`
-  for retrieval), single price point. The direction of the result should
-  generalise; the magnitude is specific to this cost structure.
+  fixed top-k), single model (`gemini-3.5-flash-lite`, with
+  `gemini-embedding-001` for retrieval), single price point. The direction of
+  the result should generalise; the magnitude is specific to this cost
+  structure.
+* **The corpus is a 500-question sample of HotpotQA, not 2000.** The evaluation
+  split is unaffected — still 50 tuning and 150 test questions — but the
+  *distractor pool* those questions are retrieved against is four times
+  thinner. HotpotQA's difficulty comes substantially from its distractors, so
+  **absolute F1 will read high against published HotpotQA baselines and should
+  not be compared to them.** The reduction was forced by a 1,000-requests-per-day
+  embedding quota, which made a full-corpus ingest a 36-day operation; see
+  [DECISIONS.md](DECISIONS.md) **[D-24]**.
+
+  It does not threaten the claim itself. An easier retrieval task inflates F1
+  for all three arms identically, and the claim is relative — CAES's cost
+  against fixed-depth at indistinguishable F1. What is lost is external
+  validity, not internal: the cost reduction is measured on a smaller retrieval
+  problem than the literature's.
 * **The provider was substituted mid-project, and not by choice.** The system
   was built against AWS Bedrock (Claude Haiku 4.5 + Titan Text Embeddings V2);
   model invocation is blocked account-wide on the available AWS account —

@@ -763,6 +763,107 @@ and `::test_gemini_countTokens_without_a_total_is_fatal`.
 
 ---
 
+### [D-24] Free-tier daily quotas set the experiment's scale, and one of them cost us corpus size
+
+**Context.** [D-22] moved model serving to Gemini because Bedrock invocation is
+blocked. That assumed the free tier's binding constraint was rate — requests per
+*minute* — which pacing handles. The account's actual quotas, read off
+`aistudio.google.com/rate-limit` on 2026-08-31, are:
+
+| Model | RPM | TPM | **RPD** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 5 | 250K | **20** |
+| `gemini-3.5-flash-lite` | 15 | 250K | **500** |
+| `gemini-embedding-001` | 100 | 30K | **1,000** |
+
+**Requests per day is the binding constraint, and it is not close.** At 20 RPD
+the full experiment — roughly 7,200 LLM calls across baselines, the λ sweep and
+the test runs — needs **360 days**. Pacing cannot help: the limit is not how
+fast you ask, it is how many times.
+
+**Decision, in three parts.**
+
+**1. The LLM becomes `gemini-3.5-flash-lite`.** It lists at the same
+$0.30/$2.50 per 1M as `gemini-2.5-flash` and allows **25× the daily requests**
+(500 against 20). Same ΔC economics, 25× the throughput; on the free tier this
+is not a trade. The experiment drops from 360 days to ~15.
+
+**2. `CORPUS_SAMPLE_SIZE` drops from 2000 to 500.** Ingest embeds the whole
+corpus up front against a separate 1,000/day embedding quota. 2000 questions is
+~18k chunks — and with [D-23]'s `countTokens` call, ~36k requests, so **36 days
+of ingest for a 15-day experiment**. 500 questions is ~4.5k chunks and ~9 days.
+
+**This one is a research change and is not free.** What shrinks is the
+*distractor pool*, not the question count: the evaluation split is still 50 tune
++ 150 test, because those need only 200 of the sampled questions. But HotpotQA's
+difficulty comes substantially from its distractors, so a thinner pool makes
+retrieval easier and **inflates F1**.
+
+Why it is nonetheless acceptable: it inflates F1 for **all three arms
+identically**. The claim is a *relative* one — CAES's cost against fixed-depth
+at indistinguishable F1 — and relative comparisons survive a uniformly easier
+task. What does not survive is external validity: the absolute F1 numbers are
+not comparable to published HotpotQA results, and the cost reduction is measured
+on a smaller retrieval problem than the one the literature uses. Recorded in
+METHODOLOGY §10 (External).
+
+**3. Daily-quota exhaustion becomes a first-class outcome, not a crash.**
+`llm.QuotaExhausted` is raised on a 429 whose `QuotaFailure.quotaId` names a
+per-day limit (or whose `retryDelay` exceeds five minutes — no per-minute limit
+asks you to wait an hour). It is deliberately **not retried**: a per-minute
+limit clears in seconds, a per-day limit does not clear until tomorrow, and
+burning five backoff attempts on it wastes time and teaches nothing.
+
+`ingest.py`, `experiments/run.py` and `calibrate_verifier.py` each catch it and
+exit cleanly with resume instructions. Nothing is lost, because the disk cache
+already makes completed work free to replay — a resumed ingest re-reads its
+finished chunks from disk and spends quota only on new ones. This is the cache
+earning its keep for a reason [D-12] never anticipated.
+
+**Why the pacer is now per model.** `GEMINI_MAX_RPM` was a single shared 15 —
+three times `gemini-2.5-flash`'s real 5 RPM and a sixth of the embedding
+model's 100. The two models draw on **separate** quota buckets, so one shared
+pacer necessarily either overran one limit or throttled the other for nothing.
+Split into `GEMINI_LLM_RPM` / `GEMINI_EMBED_RPM`, tracked in separate buckets.
+
+**Why thinking control is now keyed by model.** The 2.5 family disables thinking
+with `generationConfig.thinkingConfig.thinkingBudget`; the 3.x family moved to
+`thinkingLevel`. Sending the wrong field is a 400 on **every** call. 3.x Lite
+models have thinking off by default, so `GEMINI_THINKING_CONFIG` maps them to
+`None` — send no thinking field at all. That is an assumption about a default
+rather than an instruction, so it is verified rather than trusted: the preflight
+reports output tokens for a one-word reply, and `_parse_llm` folds any non-zero
+`thoughtsTokenCount` into the output count, so unexpected thinking surfaces as
+measured cost instead of an understated ΔC.
+
+**Rejected.** Enabling billing (~$5 for the whole project, and it would have
+made the ledger real and the costs *billed* rather than notional — declined in
+favour of staying free). Keeping the 2000-question corpus (36-day ingest).
+Falling back to `EMBED_TOKENS_MODE="estimated"` to halve ingest (breaks
+invariant 4 to save four days; the corpus reduction buys more for less
+principle). Shrinking the *evaluation* split instead of the corpus (destroys the
+paired test and the bootstrap CI — the corpus is the right thing to cut because
+it degrades external validity rather than statistical validity).
+
+**Consequences.**
+
+* Absolute F1 will read high relative to published HotpotQA baselines. Say so
+  when reporting; the comparison is internal.
+* **`gemini-3.5-flash-lite` is a weaker verifier, and the verifier is the
+  instrument (METHODOLOGY §6).** Task 5 calibration is exactly the test of
+  whether it discriminates coverage into usable bands. If it fails there, this
+  decision is the first thing to revisit — and per invariant 9, changing the
+  rubric to compensate is a research change that invalidates any λ tuned before
+  it. Calibration is only ~30 LLM calls, so it is cheap to re-run.
+* Every phase now has a wall-clock cost measured in days, and any phase can be
+  interrupted by quota and resumed. `experiments/run.py` prints its projected
+  request count and day count before starting.
+* The quotas are per model **and** per account. They do not travel with the
+  code, and `tests/test_provider.py` refuses to run a model whose RPM has not
+  been read off the dashboard and recorded.
+
+---
+
 ## 6. Traps
 
 Things that will cost you time, in rough order of likelihood.
@@ -771,7 +872,9 @@ Things that will cost you time, in rough order of likelihood.
 |---|---|---|
 | `GEMINI_API_KEY` not exported | `RuntimeError` naming the variable, before any network call | `export GEMINI_API_KEY=...` (never commit it) |
 | Index built by the other provider | `ValueError` naming both dimensions on `Retriever` construction | `rm -rf data/` and re-run `python ingest.py` — see **[D-22]** |
-| Free-tier rate limit | HTTP 429 `RESOURCE_EXHAUSTED`, retried with the server's `retryDelay` | Lower `GEMINI_MAX_RPM`; if it persists, the account's RPD is the wall |
+| Free-tier rate limit (per minute) | HTTP 429, retried with the server's `retryDelay` | Lower `GEMINI_LLM_RPM` / `GEMINI_EMBED_RPM` |
+| Free-tier quota spent (per day) | `QuotaExhausted`, not retried; the run exits with resume instructions | Re-run tomorrow. Cached calls replay free, so no quota is re-spent. See **[D-24]** |
+| Every call 400s right after a model change | wrong thinking field for the model family | Add the model to `GEMINI_THINKING_CONFIG`; 2.5 takes `thinkingBudget`, 3.x takes `thinkingLevel` |
 | Bedrock model access blocked | `ValidationException: Operation not allowed` | Account-wide block; use `CAES_PROVIDER=gemini` — see **[D-22]** |
 | Synthetic data still in `data/` | `ingest.py` exits 2 mentioning devdata | `rm -rf data/` |
 | `CAESPolicy` raises `ValueError` | λ never tuned | Run `tune_lambda.py`, write the value into `config.py` |

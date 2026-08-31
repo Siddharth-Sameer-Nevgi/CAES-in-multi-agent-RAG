@@ -60,11 +60,35 @@ at **$40**. The guards are not preferences; removing them breaks the design.
 4.5 + Titan Text Embeddings V2 only) if the block ever clears; S3 standard
 storage; a single EC2 t3.micro (or fully local); CloudWatch within free tier.
 
-**Model selection is fixed.** All LLM calls use one model — `gemini-2.5-flash`
-on the default provider, `anthropic.claude-haiku-4-5` on the Bedrock path. Never
-a larger tier: the verification agent fires every iteration and dominates spend.
-Embeddings use `gemini-embedding-001` (768 dims) or
-`amazon.titan-embed-text-v2:0` (1024 dims) respectively.
+**Model selection is fixed.** All LLM calls use one model —
+`gemini-3.5-flash-lite` on the default provider, `anthropic.claude-haiku-4-5` on
+the Bedrock path. Never a larger tier: the verification agent fires every
+iteration and dominates spend. Embeddings use `gemini-embedding-001` (768 dims)
+or `amazon.titan-embed-text-v2:0` (1024 dims) respectively.
+
+### ⏱ The real budget is requests per day, not dollars
+
+Free-tier quotas for this account, read 2026-08-31:
+
+| Model | RPM | RPD |
+|---|---:|---:|
+| `gemini-3.5-flash-lite` (in use) | 15 | **500** |
+| `gemini-2.5-flash` | 5 | 20 |
+| `gemini-embedding-001` | 100 | **1,000** |
+
+`gemini-3.5-flash-lite` lists at the same price as `gemini-2.5-flash` but allows
+25× the daily requests — that single fact is the difference between a 15-day
+experiment and a 360-day one. **The corpus was cut from 2000 questions to 500
+for the same reason**; see the note under *Build the index*, and
+[DECISIONS.md](docs/DECISIONS.md) **[D-24]**.
+
+Every long-running phase can be interrupted by the daily cap and resumed:
+`QuotaExhausted` exits cleanly with instructions, and the disk cache replays
+completed work for free, so **no quota is ever re-spent on work already done**.
+Quotas are per model *and* per account — if you change either, re-read them from
+[aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit) and
+update `config.py`. The test suite refuses to run a model whose RPM is not
+recorded.
 
 ### AWS still hosts four of the six layers
 
@@ -146,7 +170,7 @@ Run the phases in order. Each one gates the next.
 
 ```bash
 DRY_RUN=1 python -m smoke      # full graph, canned responses, $0.00
-pytest -q                      # 113 tests, no network, no credentials
+pytest -q                      # 127 tests, no network, no credentials
 
 CAES_PROVIDER=bedrock pytest -q                 # the retained provider path
 CAES_PROVIDER=bedrock DRY_RUN=1 python -m smoke
@@ -168,15 +192,27 @@ DRY_RUN=1 python -m experiments.analyze
 `devdata.py` stamps `data/meta.json` with `"synthetic": true` so synthetic data
 is never mistaken for the real corpus. Delete `data/` before the real ingest.
 
-### 1. Build the index (~$0.05, one time)
+### 1. Build the index (one time, ~9 days of free-tier quota)
 
 ```bash
-python ingest.py                        # HotpotQA distractor, 2000 questions
+python ingest.py                        # HotpotQA distractor, 500 questions
 python ingest.py --upload-s3 my-bucket  # optional; not on the query path
 ```
 
 Guarded: if `data/index.faiss` exists it refuses to re-embed. `--force`
 overrides and re-spends.
+
+~4,500 chunks × 2 requests each (the embedding plus its `countTokens`
+measurement, **[D-23]**) against a 1,000/day quota. It will stop when the day's
+allowance is spent and tell you so; **re-run it the next day and it continues
+from where it stopped**, replaying finished chunks from cache for free.
+
+> **Why 500 questions and not 2000.** Purely a quota decision — 2000 is ~36 days
+> of ingest. The evaluation split is unchanged (50 tune + 150 test); what
+> shrinks is the *distractor pool*. That makes retrieval easier, so **absolute
+> F1 will read high against published HotpotQA numbers and should not be
+> compared to them.** It inflates F1 for all three arms equally, so the relative
+> claim is unaffected. See METHODOLOGY §10 (External) and **[D-24]**.
 
 ### 2. Calibrate the verifier (~$1) — **this is a blocker**
 

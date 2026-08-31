@@ -164,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     import llm
+    from cache import CACHE, make_key
     from costs import TRACKER
 
     rows = load_hotpotqa(args.sample, config.SPLIT_SEED)
@@ -178,7 +179,25 @@ def main(argv: list[str] | None = None) -> int:
           f"(cumulative so far ${TRACKER.cumulative():.2f} of "
           f"${config.HARD_BUDGET_USD:.2f})")
 
-    vectors = embed_chunks(chunks)
+    try:
+        vectors = embed_chunks(chunks)
+    except llm.QuotaExhausted as exc:
+        # Not a failure -- the day's allowance simply ran out. Every
+        # embedding already computed is in the disk cache, so re-running
+        # tomorrow skips straight to where this stopped and spends no
+        # quota getting there.
+        done = sum(
+            1 for c in chunks
+            if CACHE.get(make_key(config.MODEL_EMBED,
+                                  llm._build_embed_body(c['text']))) is not None)
+        pct = done / max(1, len(chunks))
+        print(file=sys.stderr)
+        print(f"DAILY QUOTA SPENT after ~{done}/{len(chunks)} chunks "
+              f"({pct:.0%}).", file=sys.stderr)
+        print(f"{exc}", file=sys.stderr)
+        print("Re-run `python ingest.py` tomorrow: cached chunks replay for "
+              "free, so it continues from here.", file=sys.stderr)
+        return 3
     index = build_index(vectors)
 
     import faiss

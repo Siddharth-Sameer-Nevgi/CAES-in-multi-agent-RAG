@@ -125,6 +125,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cloudwatch      : on, namespace {config.CLOUDWATCH_NAMESPACE}"
               + (" (no dimensions)" if args.cloudwatch_no_dimensions else ""))
     print("=" * 66)
+    # Free-tier daily caps, not money, are what actually stop a run. Say so
+    # before it starts rather than after it dies partway.
+    if config.PROVIDER == "gemini" and config.GEMINI_LLM_RPD > 0 and todo:
+        est_calls = sum(2 * expected_iterations(args.policy, q["question"]) + 1
+                        for q in todo)
+        days = est_calls / config.GEMINI_LLM_RPD
+        print(f"est. LLM requests: {est_calls:.0f} against a "
+              f"{config.GEMINI_LLM_RPD}/day cap -> {days:.1f} day(s)")
+        if days > 1.0:
+            print(f"NOTE: this run needs more than one day of quota. It will "
+                  f"stop when the cap is hit; re-run with --resume tomorrow. "
+                  f"Cached calls replay free, so no quota is re-spent.")
+        print("=" * 66)
+
     if projected > args.max_usd:
         print(f"WARNING: projection exceeds the run allowance. The run-budget "
               f"guard will stop it partway; use --resume afterwards.")
@@ -148,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     t_start = time.perf_counter()
     n_done = 0
     stopped_early = False
+    import llm as llm_mod
     from costs import BudgetExceeded
 
     with out_path.open("a", encoding="utf-8") as fh:
@@ -175,6 +190,12 @@ def main(argv: list[str] | None = None) -> int:
                           f"cov={rec['final_coverage']:.2f} "
                           f"f1={rec['f1']:.2f} "
                           f"${rec['total_usd']:.5f}")
+        except llm_mod.QuotaExhausted as exc:
+            stopped_early = True
+            print(f"{chr(10)}DAILY QUOTA SPENT: {exc}")
+            print(f"{n_done} queries checkpointed to {out_path}. Re-run with "
+                  f"--resume tomorrow; cached calls replay for free, so the "
+                  f"quota is spent only on new work.")
         except BudgetExceeded as exc:
             stopped_early = True
             print(f"\nSTOPPED BY BUDGET GUARD: {exc}")

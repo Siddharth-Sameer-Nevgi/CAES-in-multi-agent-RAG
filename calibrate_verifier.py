@@ -59,33 +59,50 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
+    import llm as llm_mod
+
     retriever = get_retriever()
     results = []
+    quota_spent = False
 
-    with TRACKER.run_budget(args.max_usd, name="calibrate"):
-        for i, q in enumerate(questions, 1):
-            chunks = retriever.search(q["question"], k=args.k,
-                                      query_id=q["id"], iteration=1,
-                                      policy="calibrate")
-            v = verify(q["question"], chunks, query_id=q["id"], iteration=1,
-                       policy="calibrate")
-            results.append({
-                "id": q["id"],
-                "question": q["question"],
-                "gold": q["answer"],
-                "coverage": v.coverage,
-                "missing": v.missing,
-                "confident": v.confident,
-                "parse_failed": v.parse_failed,
-            })
-            print(f"[{i:>3}/{len(questions)}] cov={v.coverage:.2f} "
-                  f"{'PARSE-FAIL ' if v.parse_failed else ''}"
-                  f"{q['question'][:70]}")
+    try:
+        with TRACKER.run_budget(args.max_usd, name="calibrate"):
+            for i, q in enumerate(questions, 1):
+                chunks = retriever.search(q["question"], k=args.k,
+                                          query_id=q["id"], iteration=1,
+                                          policy="calibrate")
+                v = verify(q["question"], chunks, query_id=q["id"], iteration=1,
+                           policy="calibrate")
+                results.append({
+                    "id": q["id"],
+                    "question": q["question"],
+                    "gold": q["answer"],
+                    "coverage": v.coverage,
+                    "missing": v.missing,
+                    "confident": v.confident,
+                    "parse_failed": v.parse_failed,
+                })
+                print(f"[{i:>3}/{len(questions)}] cov={v.coverage:.2f} "
+                      f"{'PARSE-FAIL ' if v.parse_failed else ''}"
+                      f"{q['question'][:70]}")
+
+    except llm_mod.QuotaExhausted as exc:
+        quota_spent = True
+        print(f"{chr(10)}DAILY QUOTA SPENT after {len(results)}/"
+              f"{len(questions)} questions: {exc}", file=sys.stderr)
 
     out = config.RESULTS_DIR / "verifier_calibration.jsonl"
     with out.open("w", encoding="utf-8") as fh:
         for r in results:
             fh.write(json.dumps(r) + "\n")
+
+    if quota_spent:
+        # Judging the instrument on a truncated sample would be worse than not
+        # judging it: the pass criteria are distributional, and a short sample
+        # can pass or fail for reasons that have nothing to do with the rubric.
+        print(f"Partial results saved to {out}. Calibration is NOT decided -- "
+              f"re-run tomorrow to finish the sample.", file=sys.stderr)
+        return 3
 
     coverages = [r["coverage"] for r in results]
     n_ok = sum(1 for r in results if not r["parse_failed"])

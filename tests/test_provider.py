@@ -120,15 +120,36 @@ def _gemini_only():
         pytest.skip("Gemini-specific shaping")
 
 
-def test_gemini_disables_thinking_and_sets_max_tokens(wired):
+def test_gemini_sets_max_tokens(wired):
     _gemini_only()
     fake, _, _ = wired
     llm.invoke_llm("hello", call_type="generate", max_tokens=123)
+    assert fake.bodies[0]["generationConfig"]["maxOutputTokens"] == 123
+
+
+def test_thinking_config_matches_the_active_model_family(wired):
+    """2.5 takes thinkingBudget; 3.x moved to thinkingLevel and rejects the old
+    field. Sending the wrong one 400s every call, so it is looked up per model
+    rather than assumed."""
+    _gemini_only()
+    fake, _, _ = wired
+    llm.invoke_llm("hello", call_type="generate")
     cfg = fake.bodies[0]["generationConfig"]
-    assert cfg["maxOutputTokens"] == 123
-    assert cfg["thinkingConfig"]["thinkingBudget"] == config.GEMINI_THINKING_BUDGET
-    assert config.GEMINI_THINKING_BUDGET == 0, \
-        "thinking tokens bill as output and would inflate dC"
+    expected = config.GEMINI_THINKING_CONFIG.get(config.MODEL_LLM)
+    if expected:
+        assert cfg["thinkingConfig"] == expected
+    else:
+        assert "thinkingConfig" not in cfg, (
+            "a model with thinking off by default must send no thinking field; "
+            "an unrecognised field is a 400 on every call")
+
+
+def test_every_configured_model_has_a_thinking_decision():
+    """An unmapped model silently omits the field, which may leave thinking ON
+    and inflate dC. Force the choice to be explicit."""
+    assert config.GEMINI_MODEL_LLM in config.GEMINI_THINKING_CONFIG, (
+        f"{config.GEMINI_MODEL_LLM} has no GEMINI_THINKING_CONFIG entry; "
+        f"decide whether it needs thinkingBudget, thinkingLevel, or nothing")
 
 
 def test_gemini_system_prompt_uses_system_instruction(wired):
@@ -242,10 +263,53 @@ def test_pacer_is_tracked_per_model(monkeypatch):
         "the two models must not share one pacing bucket")
 
 
-def test_pacer_matches_the_documented_free_tier_quotas():
-    """Pacing above the real limit trades a sleep for a 429."""
-    assert config.GEMINI_LLM_RPM <= 5, "gemini-2.5-flash free tier is 5 RPM"
+def test_pacer_matches_the_active_models_free_tier_quotas():
+    """Pacing above the real limit trades a sleep for a 429.
+
+    Read off aistudio.google.com/rate-limit on 2026-08-31. Quotas are per model
+    AND per account, so they do not travel with the code: changing the model
+    means re-reading them.
+    """
+    known_rpm = {"gemini-2.5-flash": 5, "gemini-3.5-flash-lite": 15}
+    limit = known_rpm.get(config.GEMINI_MODEL_LLM)
+    assert limit is not None, (
+        f"{config.GEMINI_MODEL_LLM} has no recorded RPM; read it off the "
+        f"dashboard before running")
+    assert config.GEMINI_LLM_RPM <= limit
     assert config.GEMINI_EMBED_RPM <= 100, "gemini-embedding-001 is 100 RPM"
+
+
+def test_daily_quota_is_distinguished_from_a_per_minute_429():
+    """Retrying a per-minute limit works; retrying a per-day limit burns the
+    backoff schedule and fails anyway. They must not be conflated."""
+    per_minute = {"error": {"details": [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+         "violations": [{"quotaId": "GenerateRequestsPerMinutePerProject"}]},
+        {"retryDelay": "12s"}]}}
+    per_day = {"error": {"details": [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+         "violations": [{"quotaId":
+                         "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}
+    assert llm._is_daily_quota_failure(per_minute) is False
+    assert llm._is_daily_quota_failure(per_day) is True
+    # A very long server-supplied delay is the same signal by another route.
+    assert llm._is_daily_quota_failure(
+        {"error": {"details": [{"retryDelay": "3600s"}]}}) is True
+
+
+def test_daily_quota_raises_quota_exhausted_without_retrying(wired, monkeypatch):
+    _gemini_only()
+    fake, _, _ = wired
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    fake.canned = [(429, {"error": {
+        "code": 429, "message": "quota exceeded",
+        "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                     "violations": [{"quotaId":
+                                     "GenerateRequestsPerDayPerModel-FreeTier"}]}]}})]
+
+    with pytest.raises(llm.QuotaExhausted, match="(?i)daily quota"):
+        llm.invoke_llm("hello", call_type="generate")
+    assert fake.calls == 1, "a daily-quota 429 must not be retried"
 
 
 def test_gemini_requests_the_configured_output_dimensionality(wired):
