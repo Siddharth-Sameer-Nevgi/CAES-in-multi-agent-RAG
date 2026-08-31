@@ -369,6 +369,14 @@ happened, not merely that costs differed.
 * The verifier judges evidence for the same question it will later be used to
   answer, using the same model as the generator. Correlated errors between
   verifier and generator would understate the quality cost of stopping early.
+* **Test-split baseline results were observed before λ was frozen.** The
+  experiment driver hardcoded the test split, so the Phase 3 baselines — which
+  the protocol places on the tuning split — ran on held-out data. λ had not
+  been set at that point and was subsequently chosen from tuning-split data
+  against a rule fixed in advance (§7), so no re-tuning occurred. But the
+  analyst had seen the baselines' held-out F1, and that cannot be undone by
+  discarding the files, since the runs are deterministic and cached. Disclosed
+  rather than repaired; see [DECISIONS.md](DECISIONS.md) **[D-29]**.
 
 **External.**
 

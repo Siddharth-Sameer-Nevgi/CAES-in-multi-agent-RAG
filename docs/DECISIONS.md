@@ -1184,6 +1184,59 @@ smoothed curve.
 
 ---
 
+### [D-29] The experiment driver hardcoded the test split — an incident record
+
+**What happened.** Phase 3 baselines were run with
+`python -m experiments.run --policy fixed --n 50`, following an instruction to
+run them *on the 50-question tune split*. `experiments/run.py` hardcoded
+`test_set()`, with no flag and no mention of the split in its pre-flight banner.
+So the baselines ran on **test** while `tune_lambda.py` swept λ on **tune** —
+two disjoint question sets, silently.
+
+**How it surfaced.** The λ sweep reported CAES at F1 0.696 against a fixed-depth
+baseline of 0.644, i.e. *higher quality at lower cost*. That result was too
+good in a specific way: an earlier paired test on identical questions had shown
+extra depth helping or tying on 28/28, so a shallower policy scoring higher was
+not consistent with it. Checking which split each entry point used explained it
+— the two numbers describe different questions and are not comparable.
+
+**Two consequences, of different severity.**
+
+1. **The comparison was void.** Nothing was concluded from it. Cost: the
+   baselines have to be re-run on tune.
+2. **Test-set baseline numbers were observed before λ was frozen.** This is the
+   condition invariant 7 exists to prevent. λ had not been written to
+   `config.py`, so the invariant was not breached — but the *risk* it guards
+   against is now live, and cannot be undone by deleting files: the runs are
+   deterministic and cached, so re-running reproduces the same numbers.
+
+**Mitigation, recorded rather than hidden.**
+
+* λ is selected from **tune-split data only**, against a rule fixed in advance
+  (see §7 of METHODOLOGY): the largest-bucket share must clear the same
+  non-degeneracy bar calibration uses, and F1 is maximised subject to that.
+  This rule is derivable from the tune sweep and the pre-existing calibration
+  threshold; it makes no reference to any test number.
+* The premature observation is disclosed in METHODOLOGY §10 (Internal) as a
+  threat to validity. A reader can then weigh it. Quietly re-running and
+  presenting the result as clean would be the actual violation.
+
+**Fix.** `--split {test,tune}`, defaulting to `test`. Output paths are
+namespaced (`fixed_raw.jsonl` for test, `fixed_tune_raw.jsonl` for tune) so a
+tune run can never overwrite or be mistaken for a test artifact. The banner now
+prints the split, with `<- HELD OUT; results here must not inform lambda` on
+test. Guarded by `test_run_driver_split_selection_is_explicit_and_namespaced`
+and a disjointness test over the splits themselves.
+
+**Why the existing guard did not catch it.** `splits.py` asserts the two sets
+are disjoint, and they were — perfectly. Invariant 6 protects against *leakage
+between* the splits, and nothing leaked. The failure was using the wrong one
+and not saying which, which no disjointness assertion can detect. A default
+that is silently correct for one caller and silently wrong for another is the
+defect; printing the choice is most of the fix.
+
+---
+
 ## 6. Traps
 
 Things that will cost you time, in rough order of likelihood.
@@ -1202,6 +1255,7 @@ Things that will cost you time, in rough order of likelihood.
 | Nothing happens, exits 0 | pre-flight confirmation | Add `--yes` |
 | *Notional* cost is `$0.00` | `DRY_RUN=1` is still exported | `unset DRY_RUN` |
 | *Actual* cost is `$0.00` | not a trap on Gemini — the free tier bills nothing, always. The gate reads notional; see **[D-22]** | nothing to fix |
+| Baselines and lambda sweep disagree implausibly | they ran on different splits | `run.py` defaults to **test**; pass `--split tune` for Phase 3. See **[D-29]** |
 | Every CAES query stops at the same iteration | λ is far outside the sensitive region | Check `caes_decisions.jsonl`: if `lambda_times_delta_c` dwarfs `delta_q` everywhere, λ is too high |
 | λ sweep says "DEGENERATE" | F1 flat — usually still in `DRY_RUN` | Run with real responses |
 | λ sweep warns "degenerate on spread" | recommended λ puts >90% of queries in one iteration bucket | Compare against the best-spread λ it names; see **[D-21]** |

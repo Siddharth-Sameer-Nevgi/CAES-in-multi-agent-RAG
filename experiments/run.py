@@ -27,8 +27,15 @@ EST_USD_PER_ITERATION = 0.0015
 EST_USD_PER_GENERATION = 0.0010
 
 
-def raw_path(policy: str) -> Path:
-    return config.RESULTS_DIR / f"{policy}_raw.jsonl"
+def raw_path(policy: str, split: str = "test") -> Path:
+    """Output path, namespaced by split.
+
+    The test split keeps the bare name so existing artifacts and the analysis
+    step are unaffected; any other split is suffixed, so tune-split results can
+    never be silently read as test results.
+    """
+    stem = policy if split == "test" else f"{policy}_{split}"
+    return config.RESULTS_DIR / f"{stem}_raw.jsonl"
 
 
 def load_completed(path: Path) -> dict[str, dict]:
@@ -80,6 +87,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip query ids already in the output file")
     ap.add_argument("--yes", action="store_true",
                     help="proceed past the cost confirmation")
+    # Which split to run against. Defaults to test because that is the
+    # headline experiment, but Phase 3 baselines and any diagnostic belong on
+    # tune -- and this used to be hardcoded, so a "baselines on the tune split"
+    # instruction silently produced test-split results that were then compared
+    # against tune-split lambda sweeps. See DECISIONS [D-29].
+    ap.add_argument("--split", choices=["test", "tune"], default="test",
+                    help="question split to run against (default: test)")
     ap.add_argument("--out", type=Path, default=None)
     # Off by default so experiments stay runnable offline and without AWS
     # credentials. Publishing per-iteration cost is what makes dC observable in
@@ -96,10 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     from graph import run_query, state_summary
     from metrics import score
     from policies import build_policy
-    from splits import test_set
+    from splits import test_set, tune_set
 
-    questions = test_set()[:args.n]
-    out_path = args.out or raw_path(args.policy)
+    questions = (tune_set() if args.split == "tune" else test_set())[:args.n]
+    out_path = args.out or raw_path(args.policy, args.split)
 
     completed = load_completed(out_path) if args.resume else {}
     if not args.resume and out_path.exists():
@@ -113,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 66)
     print(f"policy          : {args.policy}"
           + (f" (n={args.fixed_n})" if args.policy == "fixed" else ""))
+    print(f"split           : {args.split}"
+          + ("   <- HELD OUT; results here must not inform lambda"
+             if args.split == "test" else "   (tuning split)"))
     print(f"questions       : {len(todo)} to run"
           + (f", {len(completed)} already done" if completed else ""))
     print(f"projected cost  : ${projected:.2f}")

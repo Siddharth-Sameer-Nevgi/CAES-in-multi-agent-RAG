@@ -202,3 +202,28 @@ def test_each_iteration_adds_new_evidence(monkeypatch):
     assert r.depths == [2, 4, 6], (
         "search depth must grow with what has been seen, or the filter can "
         "return nothing new")
+
+
+def test_run_driver_split_selection_is_explicit_and_namespaced():
+    """A tune-split run must never write to the test-split artifact.
+
+    The driver hardcoded test_set(), so an instruction to run baselines on the
+    tune split silently produced test-split results that were then compared
+    against a tune-split lambda sweep. See DECISIONS [D-29].
+    """
+    from experiments.run import raw_path
+
+    assert raw_path("fixed", "test").name == "fixed_raw.jsonl"
+    assert raw_path("fixed", "tune").name == "fixed_tune_raw.jsonl"
+    assert raw_path("fixed", "test") != raw_path("fixed", "tune")
+
+
+def test_splits_are_disjoint_and_correctly_sized():
+    from splits import test_set, tune_set
+    import config
+
+    t, s = tune_set(), test_set()
+    assert len(t) == config.N_TUNE
+    assert len(s) == config.N_TEST
+    assert not ({q["id"] for q in t} & {q["id"] for q in s}), \
+        "tune and test splits overlap; invariant 6"
