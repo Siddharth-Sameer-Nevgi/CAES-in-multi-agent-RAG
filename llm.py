@@ -640,4 +640,9 @@ if __name__ == "__main__":
     if not args.check:
         ap.print_help()
         sys.exit(0)
-    sys.exit(check_provider())
+    try:
+        sys.exit(check_provider())
+    except RuntimeError as exc:
+        # A preflight should report the problem, not traceback at the operator.
+        print(f"\nFAILED: {exc}", file=sys.stderr)
+        sys.exit(1)
