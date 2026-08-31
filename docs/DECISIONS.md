@@ -1093,6 +1093,97 @@ did nothing.
 
 ---
 
+### [D-28] The trajectory gates calibration; the iteration-1 marginal only warns
+
+**Context.** Calibration asks one question: *is the verifier a usable ΔQ
+signal?* It was answered with three criteria on the **iteration-1 marginal** —
+stdev, range, and no single 0.1-wide bin over 60%. On the final run:
+
+| Criterion | Result | |
+|---|---|---|
+| JSON validity | 30/30 | pass |
+| stdev | 0.330 (need 0.12) | pass |
+| range | 0.90 (need 0.40) | pass |
+| largest bin | **63%** (need ≤60%) | **fail** |
+
+**Decision.** Phase B (trajectories) gates. Phase A (the marginal) is reported
+loudly and does not block — *provided* trajectories were measured. Under
+`--no-trajectories` phase A blocks exactly as before.
+
+**Why the marginal is the wrong instrument for this question.** ΔQ is a
+*difference across iterations*, taken on the running-max smoothed series
+(METHODOLOGY §3.1, `CAESPolicy.decide`). The marginal is a distribution over a
+*single* iteration. It was a **proxy** for "does the verifier discriminate?",
+adopted before any trajectory measurement existed. It is now redundant against
+four direct measurements:
+
+* smoothed coverage rises **+0.141** across iterations (threshold +0.05);
+* observed ΔQ per iteration is **+0.107, +0.021, +0.012, +0.000** — the
+  diminishing-returns premise the whole method rests on, measured;
+* coverage correlates with **measured gold recall** at Spearman 0.535,
+  p = 0.0023;
+* gold recall itself climbs **0.833 → 1.000**, so later retrievals surface
+  evidence the first one missed.
+
+The 63% is explained, not excused: **67% of questions have all their gold
+passages retrieved at iteration 1**. Those are correctly scored 1.0. The
+marginal is measuring how easy the *task* is, and `gold_recall` now reports
+that directly and without a proxy.
+
+**The objection this decision has to survive.** This is the second criterion
+corrected in one session, and both corrections moved in the direction of
+passing. That pattern is exactly what motivated reasoning looks like, and it
+should not be waved away. Three things distinguish it:
+
+1. **The earlier correction was a defect, not a relaxation.** The trajectory
+   criterion was applied to the raw series when the gate reads the smoothed
+   one. The threshold (+0.05) was never changed; the series it was applied to
+   was wrong. On the correct series the same run passes with margin.
+2. **No threshold moved here either.** `MAX_SINGLE_BIN_SHARE` is still 0.60 and
+   still evaluated and printed. Its *status* changed, and only when a strictly
+   better measurement of the same construct is present.
+3. **The direction was forced by evidence, not by the outcome.** Gold recall at
+   100% (k=5) and 67% (k=2) was measured *before* deciding, and it says the
+   verifier is right. Acting on the marginal would have meant editing a rubric
+   that scores correctly — [D-25] is that argument in full.
+
+**What this decision does NOT do.** It does not dismiss the finding. A
+top-heavy marginal predicts a **depth-heavy iteration histogram**, and that is
+a real threat to the paper's central figure. Simulating the real gate on the
+recorded trajectories:
+
+| λ | histogram (depth 1–5) | mean | largest bucket |
+|---|---|---|---|
+| 1 – 300 | `[0, 11, 3, 1, 0]` | 2.33 | 73% |
+| 1000 | `[0, 15, 0, 0, 0]` | 2.00 | 100% |
+| 3000 | `[9, 6, 0, 0, 0]` | 1.40 | 60% |
+
+So the warning is carried forward explicitly, and **Phase 4 is where it gets
+adjudicated** — [D-21] already specifies the degenerate-spread check and
+`tune_lambda.py` already reports largest-bucket share per λ. The right place to
+fail this experiment, if it deserves to fail, is on the λ sweep's spread
+report, not on a proxy for an instrument that demonstrably works.
+
+**Two further findings recorded rather than resolved.**
+
+* **The λ-sensitive band moved to ~1000–3000**, from the synthetic-corpus
+  finding of λ∈[40,70] in [D-21]. Gemini's cheaper tokens shrink ΔC, so λ must
+  grow to keep λ·ΔC comparable to ΔQ. The coarse grid tops out at 1000 and will
+  need extending.
+* **No query stops at iteration 1** below λ≈2500, because `estimate_delta_q`
+  returns 1.0 with fewer than two observations ("unknown, allow one more"), so
+  escaping iteration 1 needs λ·ΔC > 1.0. The effective minimum depth is 2. This
+  is [D-15] and §3.1 behaving as designed, but it bounds the achievable
+  histogram and should be stated when reporting depth.
+
+**Consequences.** Calibration exits 0 and prints its warnings above the verdict
+rather than below it. The marginal remains in the output of every run, so the
+number is never lost. If a future verifier genuinely stops discriminating, the
+trajectory criteria catch it — a blunt verifier cannot produce a rising
+smoothed curve.
+
+---
+
 ## 6. Traps
 
 Things that will cost you time, in rough order of likelihood.

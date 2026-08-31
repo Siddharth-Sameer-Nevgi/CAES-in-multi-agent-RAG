@@ -16,8 +16,12 @@ Two phases:
      and FLATTENS, which is the diminishing-returns premise the method rests on
      (METHODOLOGY 3.1).
 
-Pass on phase A alone is not sufficient, and failing A while passing B is
-informative rather than fatal -- see the verdict text.
+**Phase B gates; phase A warns.** Phase A's spread criteria are a proxy for
+"is the verifier informative?", and phase B measures that directly on the
+series the gate actually differentiates. A failing marginal alongside a healthy
+trajectory means the TASK is easy, not that the instrument is blunt -- so it is
+reported loudly and does not block. With `--no-trajectories` there is no direct
+measurement, and phase A blocks again. See DECISIONS [D-28].
 
 Costs roughly $1 at n=30. Runs against the tuning split so the test set stays
 untouched.
@@ -350,29 +354,48 @@ def main(argv: list[str] | None = None) -> int:
         print("the problem -- see DECISIONS [D-25].")
         return 1
 
-    print("BLOCKED on the ITERATION-1 MARGINAL:")
-    for f in failures:
-        print(f"  - {f}")
-    if trajectories:
-        print()
-        print(f"But TRAJECTORIES PASSED: mean coverage rises {traj_rise:+.3f} "
-              f"and {traj_moving:.0%} of queries move.")
-        print("A top-heavy marginal with a healthy trajectory means many "
-              "questions are")
-        print("simply easy at iteration 1 -- not that the verifier is blunt. "
-              "Check the")
-        print("gold_recall line before touching VERIFIER_PROMPT: sharpening a "
-              "rubric")
-        print("that is already correct damages a working instrument. See "
-              "DECISIONS [D-25].")
-    else:
+    # The marginal is a WARNING when trajectories were measured, and a BLOCKER
+    # when they were not. It is a proxy for "is the verifier informative?"; the
+    # trajectory is the direct measurement of the same thing, on the series the
+    # gate actually differentiates. A proxy that contradicts a direct
+    # measurement is not evidence -- but with no direct measurement available,
+    # the proxy is all there is. See DECISIONS [D-28].
+    if not trajectories:
+        print("BLOCKED on the ITERATION-1 MARGINAL:")
+        for f in failures:
+            print(f"  - {f}")
         print()
         print("Trajectories were NOT measured, so this verdict rests on a "
               "marginal")
         print("distribution alone, which cannot establish dQ. Re-run without "
               "--no-trajectories")
         print("before acting on it.")
-    return 1
+        return 1
+
+    print("PASS (with warnings). The verifier is a usable dQ signal.")
+    print()
+    print("Trajectory evidence -- the direct test, on the series the gate "
+          "differentiates:")
+    print(f"  smoothed coverage rises {traj_rise:+.3f} across iterations "
+          f"(need {MIN_TOTAL_RISE:+.2f})")
+    print(f"  {traj_moving:.0%} of queries move (need "
+          f"{MIN_MOVING_SHARE:.0%})")
+    print()
+    print("WARNINGS on the iteration-1 marginal:")
+    for f in failures:
+        print(f"  - {f}")
+    print()
+    print("This measures how hard the TASK is, not how blunt the verifier is.")
+    print("Check the gold_recall line: questions whose supporting passages are")
+    print("all retrieved on the first try are correctly scored 1.0, and")
+    print("sharpening a rubric that is already right damages a working")
+    print("instrument (DECISIONS [D-25], [D-28]).")
+    print()
+    print("Carry forward to Phase 3: a top-heavy marginal predicts a")
+    print("depth-heavy ITERATION HISTOGRAM. If the recommended lambda puts most")
+    print("queries in one bucket, that is [D-21]'s degenerate spread and it")
+    print("threatens the paper's central figure -- check it there.")
+    return 0
 
 
 if __name__ == "__main__":

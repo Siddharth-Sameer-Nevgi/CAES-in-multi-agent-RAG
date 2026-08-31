@@ -232,6 +232,33 @@ guessing. Flat coverage means zero measured gain, so the gate stops. A parse
 failure can therefore end a query early but can never be mistaken for progress,
 and the failure count is recorded per query so its rate is reportable.
 
+### 6.1 Calibration result
+
+Validated 2026-08-31 on 30 held-out tuning questions, with 5-iteration
+trajectories for 15 of them.
+
+| Measure | Value |
+|---|---|
+| JSON validity | 30/30, no repair retry, no fallback |
+| Coverage stdev / range | 0.330 / 0.90 |
+| Smoothed coverage rise over 5 iterations | **+0.141** |
+| Observed ΔQ per iteration | +0.107, +0.021, +0.012, +0.000 |
+| Correlation with measured gold recall | Spearman 0.535, p = 0.0023 |
+| Gold recall across iterations | 0.833 → 1.000 |
+| Verifier share of total spend | 28% |
+
+The ΔQ signal is established on the series the gate differentiates, and the
+observed per-iteration gains reproduce the diminishing-returns shape §3.1
+assumes rather than merely being consistent with it.
+
+**Two limitations recorded at calibration.** 67% of questions have all their
+supporting passages retrieved at iteration 1 and are correctly scored ~1.0, so
+the iteration-1 distribution is top-heavy; this is a property of the retrieval
+task, measured directly by gold recall, not of the rubric. And the raw coverage
+series is volatile — mean absolute step 0.086, worst single drop −0.65 — which
+running-max smoothing absorbs for ΔQ but the *generator* does not, since it
+reads the raw accumulated evidence. Both are carried into §7 and §10.
+
 ## 7. Tuning λ
 
 Run on the 50-question tuning split only, in two passes:
