@@ -1258,10 +1258,12 @@ Genuinely undecided, flagged so nobody assumes they were settled.
    It was worth more than anticipated: reconstructing it after the fact is what
    revealed that [D-25]'s calibration failure was a trivial retrieval task
    rather than a blunt rubric.
-4. **One-shot's complexity score is hand-built.** The spec permitted a small
-   Haiku call instead. The current heuristic is free and deterministic, but if
-   B2 routes nearly every question to the same depth on real data, the baseline
-   is weak and a reviewer will say so — check the depth distribution.
+4. ~~**One-shot's complexity score is hand-built.**~~ **RESOLVED 2026-08-31.**
+   Measured on the 50-question tune split, B2's depth distribution is
+   6% / 50% / 42% / 2% across depths 1–4, mean 2.40, largest bucket 50%. It is
+   **not** degenerate: the heuristic genuinely discriminates, so the baseline
+   is a real one and the reviewer objection does not apply. It remains free and
+   deterministic, so the spec's optional LLM-based scorer stays unused.
 5. **`FixedPolicy(n=3)` is the headline baseline.** Whether N=3 is the fair
    comparison, or whether the N that matches CAES's mean iteration count is
    fairer, is a framing decision worth making explicitly before writing up.

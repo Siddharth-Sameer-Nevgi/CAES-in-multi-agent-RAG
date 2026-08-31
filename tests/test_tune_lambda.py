@@ -118,3 +118,20 @@ def test_format_row_flags_single_bucket_inline():
 
     row["max_bucket_share"] = 0.5
     assert "single bucket" not in format_row(row)
+
+
+def test_coarse_grid_brackets_the_measured_sensitive_band():
+    """The grid must span where the gate's decision actually changes.
+
+    Measured on calibration trajectories (2026-08-31): the iteration histogram
+    is identical for every lambda from 1 to 300, degenerate at 1000, and first
+    splits at 3000. A grid ceiling of 1000 would step clean over that band and
+    report a degenerate lambda as optimal -- the [D-21] failure, one decade up.
+    """
+    from tune_lambda import COARSE_GRID
+
+    assert max(COARSE_GRID) >= 10000, (
+        "grid ceiling is below the measured sensitive band (~1000-10000); "
+        "see DECISIONS [D-28]")
+    band = [x for x in COARSE_GRID if 1000 <= x <= 10000]
+    assert len(band) >= 3, f"only {len(band)} grid points in the sensitive band"

@@ -26,7 +26,17 @@ log = logging.getLogger("caes.tune")
 # Roughly half-decade steps. The gate's sensitive band -- where lambda*dC is
 # comparable to dQ and iteration counts actually vary -- is narrow, and a
 # decade-spaced grid steps clean over it. See [D-21] in DECISIONS.md.
-COARSE_GRID = [1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0]
+# EXTENDED 2026-08-31 from a 1000 ceiling. Simulating the gate on measured
+# calibration trajectories showed the histogram identical for every lambda from
+# 1 to 300, degenerate at 1000 (100% of queries at depth 2), and only splitting
+# at 3000. The sensitive band is ~1000-10000, so a grid stopping at 1000 steps
+# clean over it -- exactly the failure [D-21] was written about, one decade up.
+#
+# The band moved because dC shrank: Gemini input tokens are ~3x cheaper than
+# the Bedrock configuration the synthetic lambda-in-[40,70] finding came from,
+# and lambda must grow to keep lambda*dC comparable to dQ. Half-decade spacing
+# is preserved. See DECISIONS [D-28].
+COARSE_GRID = [1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10000.0]
 
 # Multipliers for the refinement pass, log-spaced about the knee. Linear
 # refinement around a centre found on a log grid oversamples one side.
