@@ -698,3 +698,59 @@ Corpus built for real (free — no API key needed, dataset processing only):
   the behaviour the gate's cache-neutrality depends on.
 
 ---
+
+## [0.3.2] — 2026-08-31
+
+**First real ingest run. 1,517 of 5,552 chunks embedded before the daily
+embedding quota tripped, then a clean stop.** No index yet — `data/` is empty
+by design, since `ingest.py` writes the FAISS index only after every chunk is
+embedded.
+
+### The quota machinery worked
+
+`QuotaExhausted` fired on Google's per-day `embed_content_free_tier_requests`
+violation, was **not** retried, and exited with a progress figure and resume
+instructions rather than a stack trace. Exactly the behaviour [D-24] specifies.
+
+Worth noting: Google's error suggested `retryDelay: 45.4s`, which would be
+useless advice for a cap that resets tomorrow. The per-day detection correctly
+ignored it and keyed on the quota id instead.
+
+### Resume verified before relying on it
+
+Rebuilt the corpus from scratch and checked cache membership without issuing a
+single request:
+
+| | |
+|---|---:|
+| Chunks rebuilt | 5,552 (identical to the run) |
+| Cached | **1,517**, a contiguous prefix, first miss at index 1517 |
+| Batch token counts cached | 31 of 112 |
+| Requests remaining | **4,116** |
+
+Corpus construction is deterministic — fixed split seed, insertion-ordered
+dedup — so tomorrow's run replays the finished prefix from disk and continues
+at chunk 1,518.
+
+### Measured
+
+| | |
+|---|---:|
+| Requests before the cap | **~1,549** (1,518 embeddings + 31 counts) |
+| Wall time | **22 min** for a full day's quota |
+| Throughput | ~69 requests/min against a 100 RPM pacer |
+| Ledger after run | $0.0331 list-price, **$0.00 billed** |
+
+**The dashboard's 1,000 RPD was not the effective limit** — the cap tripped at
+~1,549. `GEMINI_EMBED_RPD` stays at the documented 1,000 anyway: it only feeds
+a projected day count, and over-estimating days is the safe direction. At the
+observed rate ingest completes in **~2.7 more days**, not the 4.1 the
+conservative figure implies.
+
+### Not a defect
+
+The `multiprocess.ResourceTracker` `AttributeError` at interpreter shutdown
+comes from a `datasets` dependency on Windows, fires after the run has
+finished, and affects nothing.
+
+---

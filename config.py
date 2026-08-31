@@ -137,6 +137,13 @@ GEMINI_EMBED_RPM = 100
 # Daily request ceilings, for pre-flight feasibility warnings only. These are
 # NOT enforced -- the server enforces them; we surface them so a run that
 # cannot possibly finish says so before it starts. 0 means "no known limit".
+#
+# OBSERVED 2026-08-31, first real ingest: the embedding cap tripped after
+# ~1,549 requests (1,518 embeddings + 31 batched counts), not the 1,000 the
+# dashboard reports -- so there is burst headroom, lag in the accounting, or
+# both. Left at the documented 1,000 deliberately: the number is used only to
+# print a projected day count, and over-estimating the days is the safe
+# direction. Real throughput has been closer to 1,500/day.
 GEMINI_LLM_RPD   = 500
 GEMINI_EMBED_RPD = 1000
 
