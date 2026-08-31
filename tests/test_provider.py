@@ -222,6 +222,32 @@ def test_gemini_estimated_embed_mode_is_opt_in_and_warns(wired, monkeypatch, cap
         "estimating token counts must be loud; it breaks invariant 4"
 
 
+def test_pacer_is_tracked_per_model(monkeypatch):
+    """The LLM and embedding quotas differ 20x; one shared pacer serves neither."""
+    monkeypatch.setattr(config, "GEMINI_LLM_RPM", 60)      # 1.0s gap
+    monkeypatch.setattr(config, "GEMINI_EMBED_RPM", 600)   # 0.1s gap
+    monkeypatch.setattr(llm, "_last_request_at", {})
+    slept: list[float] = []
+    monkeypatch.setattr(llm.time, "sleep", lambda s: slept.append(s))
+    # A real monotonic clock starts at system uptime, not 0, so an unseen model
+    # never waits on its first call. Pin it somewhere plausibly non-zero.
+    monkeypatch.setattr(llm.time, "monotonic", lambda: 1000.0)
+
+    llm._pace(config.MODEL_LLM)      # first call for this model: no wait
+    llm._pace(config.MODEL_EMBED)    # different model, separate bucket: no wait
+    llm._pace(config.MODEL_LLM)      # second LLM call: full 1.0s gap
+    llm._pace(config.MODEL_EMBED)    # second embed call: 0.1s gap
+
+    assert slept == [pytest.approx(1.0), pytest.approx(0.1)], (
+        "the two models must not share one pacing bucket")
+
+
+def test_pacer_matches_the_documented_free_tier_quotas():
+    """Pacing above the real limit trades a sleep for a 429."""
+    assert config.GEMINI_LLM_RPM <= 5, "gemini-2.5-flash free tier is 5 RPM"
+    assert config.GEMINI_EMBED_RPM <= 100, "gemini-embedding-001 is 100 RPM"
+
+
 def test_gemini_requests_the_configured_output_dimensionality(wired):
     _gemini_only()
     fake, _, _ = wired

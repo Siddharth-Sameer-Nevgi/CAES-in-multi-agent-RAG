@@ -165,25 +165,28 @@ def _bedrock_invoke(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _rpm_lock = threading.Lock()
-_last_request_at = 0.0
+_last_request_at: dict[str, float] = {}
 
 
-def _pace() -> None:
-    """Client-side requests-per-minute pacer for the free tier.
+def _pace(model: str) -> None:
+    """Client-side requests-per-minute pacer, tracked per model.
 
-    Free-tier limits are per-account and are no longer published per model, so
-    this errs slow rather than discovering the limit by tripping it. 429s are
-    still retried; this only reduces how often that happens.
+    The LLM and the embedding model have very different quotas (5 RPM against
+    100 RPM on the free tier this was built for), and they draw on separate
+    buckets -- so a single shared pacer would either throttle embeddings to the
+    LLM's pace or overrun the LLM's limit. 429s are still retried; pacing only
+    reduces how often that happens.
     """
-    if config.GEMINI_MAX_RPM <= 0:
+    rpm = (config.GEMINI_EMBED_RPM if model == config.MODEL_EMBED
+           else config.GEMINI_LLM_RPM)
+    if rpm <= 0:
         return
-    min_gap = 60.0 / config.GEMINI_MAX_RPM
-    global _last_request_at
+    min_gap = 60.0 / rpm
     with _rpm_lock:
-        wait = min_gap - (time.monotonic() - _last_request_at)
+        wait = min_gap - (time.monotonic() - _last_request_at.get(model, 0.0))
         if wait > 0:
             time.sleep(wait)
-        _last_request_at = time.monotonic()
+        _last_request_at[model] = time.monotonic()
 
 
 def _gemini_api_key() -> str:
@@ -224,7 +227,7 @@ def _gemini_post(method: str, model: str, body: dict[str, Any]) -> dict[str, Any
     delay = 1.0
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES):
-        _pace()
+        _pace(model)
         try:
             resp = requests.post(url, headers=headers, json=body,
                                  timeout=config.GEMINI_TIMEOUT_S)

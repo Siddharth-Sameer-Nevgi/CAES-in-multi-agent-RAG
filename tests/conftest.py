@@ -147,8 +147,9 @@ def _select_provider(monkeypatch, provider: str) -> None:
     monkeypatch.setattr(config, "PROVIDER", provider)
     for name, value in config.provider_settings(provider).items():
         monkeypatch.setattr(config, name, value)
-    # The pacer would otherwise sleep 4s between calls at the default 15 RPM.
-    monkeypatch.setattr(config, "GEMINI_MAX_RPM", 0)
+    # The pacer would otherwise sleep 12s between LLM calls at 5 RPM.
+    monkeypatch.setattr(config, "GEMINI_LLM_RPM", 0)
+    monkeypatch.setattr(config, "GEMINI_EMBED_RPM", 0)
 
 
 def _forbidden(what: str):

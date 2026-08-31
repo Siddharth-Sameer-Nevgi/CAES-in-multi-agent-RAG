@@ -96,11 +96,27 @@ GEMINI_TIMEOUT_S = 120
 # understated dC.
 GEMINI_THINKING_BUDGET = 0
 
-# Free-tier rate limits are per-account and no longer published per model, so
-# this is a client-side pacer rather than a mirror of a documented number.
-# 0 disables pacing. 429s are additionally retried with the server-supplied
-# retryDelay when one is offered.
-GEMINI_MAX_RPM = 15
+# Client-side pacer, per model class. Limits are per-account and visible only
+# at aistudio.google.com/rate-limit, so these mirror one account's observed
+# quota rather than a documented universal number. 0 disables pacing; 429s are
+# retried with the server-supplied retryDelay regardless.
+#
+# READ FROM THE DASHBOARD 2026-08-31, free tier:
+#   gemini-2.5-flash      5 RPM / 250K TPM /    20 RPD
+#   gemini-embedding-001  100 RPM / 30K TPM / 1,000 RPD
+# The single shared value this replaced was 15 -- three times the LLM's actual
+# limit, and a sixth of the embedding model's. Paced separately now.
+#
+# RPD, not RPM, is the binding constraint on the free tier: 20 LLM requests a
+# day is roughly three questions. See DECISIONS [D-24].
+GEMINI_LLM_RPM   = 5
+GEMINI_EMBED_RPM = 100
+
+# Daily request ceilings, for pre-flight feasibility warnings only. These are
+# NOT enforced -- the server enforces them; we surface them so a run that
+# cannot possibly finish says so before it starts. 0 means "no known limit".
+GEMINI_LLM_RPD   = 20
+GEMINI_EMBED_RPD = 1000
 
 # gemini-embedding-001's :embedContent response carries no token count, so the
 # count is measured with a separate :countTokens call. See DECISIONS [D-23].
