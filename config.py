@@ -174,7 +174,17 @@ LAMBDA = None          # must be set explicitly before CAES runs
 DECAY_FACTOR = 0.6     # dQ extrapolation
 
 # --- Retrieval ---
-TOP_K = 5
+# REDUCED from 5 on 2026-08-31, after calibration measured gold-passage recall
+# at 100% with k=5 and a median gold rank of 2. At k=5 a single retrieval is
+# sufficient by construction, so there is nothing for a stopping rule to
+# decide: dQ collapses to ~0 after iteration 1 and every policy degenerates to
+# depth 1. At k=2 roughly 35% of questions genuinely need a second retrieval.
+#
+# This sets the OPERATING REGIME, it does not tune the result: k applies
+# identically to all three arms, and the gate never sees it. Absolute F1 falls
+# for every policy because 2 chunks is thinner evidence than 5 -- an external
+# validity note, not a threat to the relative claim. See DECISIONS [D-25].
+TOP_K = 2
 CHUNK_TOKENS = 200
 CHUNK_OVERLAP_TOKENS = 30
 EMBED_BATCH = 50

@@ -818,3 +818,67 @@ cache means subsequent loads take ~13 s from disk. The library's warning is
 generic advice, not a limit this project hit.
 
 ---
+
+## [0.5.0] — 2026-08-31
+
+**Verifier calibration failed its gate — and the cause was not the verifier.**
+Full diagnosis in [DECISIONS.md](DECISIONS.md) **[D-25]** and **[D-26]**.
+
+### What the run said
+
+```
+JSON validity : 30/30
+coverage      : mean 0.873  stdev 0.269  min 0.10  max 1.00
+largest bin   : 0.9-1.0 holds 80%          <- fails the 60% ceiling
+BLOCKED. The verifier is not yet a usable dQ signal
+```
+
+Two of three criteria passed: stdev 0.269 (needs ≥ 0.12) and range 0.90
+(needs ≥ 0.40). Parsing was perfect — no repair retry, no fallback.
+
+### What was actually wrong
+
+Gold-passage recall at iteration 1 with k=5: **100%**. Median rank of the
+harder supporting passage: **2**. All 24 questions scoring coverage 1.00 had
+*both* gold passages retrieved.
+
+**The verifier was correct every time.** Sharpening `VERIFIER_PROMPT` — the
+obvious response, and what the script's own message suggests — would have
+damaged a working instrument to compensate for a trivial retrieval task.
+
+Two alternative explanations were tested and rejected: question type (bridge
+saturates at 82%, comparison at 75% — both broken) and corpus size (adding
+unrelated passages cannot hide a question's topical gold, so ~12 days of
+re-ingest would likely have changed nothing).
+
+### Changed
+
+- **`TOP_K` 5 → 2.** At k=2, recall of both gold passages is 67% overall and
+  59% on bridge questions, so ~35% of queries genuinely need a second
+  retrieval. This is regime selection, not result tuning: k applies identically
+  to all arms, the gate never reads it, and the direction came from a measured
+  property of retrieval rather than from observing which setting favoured CAES.
+  At k=5 the experiment could not test its own hypothesis — with one retrieval
+  always sufficient, every stopping rule produces identical evidence.
+
+### Added
+
+- **Gold-passage recall, recorded every iteration** — `gold_recall_history` in
+  every per-query record, and reported by `calibrate_verifier`. This closes
+  **open question 3**, open since the first build. [D-25] is the argument for
+  it: the project's most consequential finding was recoverable only by
+  reconstructing recall from cached embeddings after the fact.
+- **A ground-truth firewall.** `supporting_facts` titles are the answer key, so
+  a policy that could see them would pick its depth from the answer.
+  `test_gold_titles_are_invisible_to_the_gate` greps `evaluate_gate`,
+  `route_from_state` and the verify node to pin that they never reference them.
+  An unlabelled run records `-1.0`, distinguishing "no ground truth" from
+  "retrieved nothing".
+
+### Cost
+
+$0.0124 notional for the calibration run, $0.00 billed. 30 of the day's 500 LLM
+requests. Re-running is another ~30 — the cached query embeddings replay free,
+so only the verifier calls are new.
+
+---

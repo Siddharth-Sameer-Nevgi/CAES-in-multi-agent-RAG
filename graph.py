@@ -43,6 +43,9 @@ class State(TypedDict, total=False):
     latency_history: list[float]
     confident: bool
     parse_failures: int
+    # --- instrumentation only, never read by the gate ---
+    gold_titles: list[str]          # HotpotQA supporting_facts titles
+    gold_recall_history: list[float]
     total_usd: float
     total_latency_ms: float
     _route: str                    # "retrieve" | "generate", set by verify
@@ -52,7 +55,8 @@ class State(TypedDict, total=False):
     _query_latency_mark: float
 
 
-def initial_state(question: str, query_id: str = "", policy: str = "") -> State:
+def initial_state(question: str, query_id: str = "", policy: str = "",
+                  gold_titles: list[str] | None = None) -> State:
     import llm
     t = llm.totals()
     return State(
@@ -71,6 +75,8 @@ def initial_state(question: str, query_id: str = "", policy: str = "") -> State:
         latency_history=[],
         confident=False,
         parse_failures=0,
+        gold_titles=list(gold_titles or []),
+        gold_recall_history=[],
         total_usd=0.0,
         total_latency_ms=0.0,
         _route="",
@@ -113,12 +119,33 @@ def node_retrieve(state: State) -> dict[str, Any]:
     )
     seen = set(state["seen_chunk_ids"])
     fresh = [c for c in hits if c.chunk_id not in seen]
+    evidence = state["evidence"] + fresh
     log.debug("[%s it%d] retrieved %d hits, %d new",
               state["query_id"], state["iteration"], len(hits), len(fresh))
     return {
-        "evidence": state["evidence"] + fresh,
+        "evidence": evidence,
         "seen_chunk_ids": state["seen_chunk_ids"] + [c.chunk_id for c in fresh],
+        "gold_recall_history": (state.get("gold_recall_history", [])
+                                + [gold_recall(evidence, state.get("gold_titles"))]),
     }
+
+
+def gold_recall(evidence: list, gold_titles) -> float:
+    """Fraction of the question's supporting passages now in evidence.
+
+    **Instrumentation only. The gate must never read this.** It is the answer
+    to DECISIONS open question 3: without it, a low F1 is ambiguous between
+    "the gate stopped too early" and "retrieval never surfaced the passage",
+    and those call for opposite fixes. Recording it per iteration separates
+    them directly.
+
+    Returns -1.0 when no gold titles are known, so an unlabelled run is
+    distinguishable from a run that retrieved nothing.
+    """
+    if not gold_titles:
+        return -1.0
+    have = {getattr(c, "title", None) or c.get("title", "") for c in evidence}
+    return sum(1 for t in gold_titles if t in have) / len(gold_titles)
 
 
 def make_verify_node(policy, honor_confidence: bool = False) -> Callable:
@@ -277,10 +304,16 @@ def run_query(
     *,
     query_id: str = "",
     honor_confidence: bool = False,
+    gold_titles: list[str] | None = None,
 ) -> State:
-    """Run one question end to end and return the final state."""
+    """Run one question end to end and return the final state.
+
+    `gold_titles` is recorded for retrieval diagnostics only and is never
+    visible to the policy or the gate -- see `gold_recall`.
+    """
     state = initial_state(question, query_id=query_id,
-                          policy=getattr(policy, "name", "unknown"))
+                          policy=getattr(policy, "name", "unknown"),
+                          gold_titles=gold_titles)
     t0 = time.perf_counter()
 
     compiled = _compiled_for(policy, honor_confidence)
@@ -318,5 +351,8 @@ def state_summary(state: State) -> dict[str, Any]:
         "latency_history": [round(l, 2) for l in state.get("latency_history", [])],
         "n_evidence": len(state["evidence"]),
         "parse_failures": state.get("parse_failures", 0),
+        "gold_recall_history": state.get("gold_recall_history", []),
+        "final_gold_recall": (state["gold_recall_history"][-1]
+                              if state.get("gold_recall_history") else -1.0),
         "answer": state.get("answer") or "",
     }

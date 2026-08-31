@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     from agents.verifier import verify
+    from graph import gold_recall
     from costs import TRACKER
     from retrieval import get_retriever
     from splits import tune_set
@@ -77,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
                     "id": q["id"],
                     "question": q["question"],
                     "gold": q["answer"],
+                    # Separates "gate stopped early" from "retrieval missed it".
+                    "gold_recall": gold_recall(chunks, q.get("supporting_titles")),
                     "coverage": v.coverage,
                     "missing": v.missing,
                     "confident": v.confident,
@@ -120,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     for label, count in bins.items():
         print(f"    {label}  {'#' * count}{'' if count else '.'} ({count})")
     print(f"largest bin   : {top_bin} holds {top_share:.0%}")
+    recalls = [r["gold_recall"] for r in results if r["gold_recall"] >= 0]
+    if recalls:
+        full = sum(1 for r in recalls if r >= 1.0)
+        print(f"gold recall   : mean {statistics.mean(recalls):.2f}  "
+              f"all-gold-retrieved {full}/{len(recalls)} "
+              f"({full / len(recalls):.0%} of questions need no 2nd retrieval)")
     print(f"spend         : ${TRACKER.cumulative():.4f} cumulative")
     print("=" * 62)
 

@@ -888,6 +888,123 @@ it degrades external validity rather than statistical validity).
 
 ---
 
+### [D-25] `TOP_K` is 2 because at 5 there was nothing for the gate to decide
+
+**Context.** The first real verifier calibration failed its gate: 80% of
+coverage scores landed in the single bin 0.9–1.0, against a ceiling of 60%.
+
+The obvious reading is that the rubric does not discriminate, and the obvious
+fix is to sharpen `VERIFIER_PROMPT`. **Both are wrong**, and acting on them
+would have destroyed a working instrument.
+
+**What the diagnosis actually found.** Measuring gold-passage recall against
+HotpotQA's `supporting_facts` titles — reconstructible for free, because the
+query embeddings were already cached:
+
+| | |
+|---|---:|
+| Gold recall at iteration 1, k=5 | **100%** |
+| Median rank of the *harder* gold passage | **2** |
+| Questions where coverage = 1.00 *and* all gold retrieved | 24 / 24 |
+
+**The verifier was right every time.** When both supporting passages are in the
+evidence, coverage genuinely is 1.0, and JSON parsed cleanly 30/30. The
+instrument was reading a task that was actually trivial.
+
+**Why the task is trivial.** `build_corpus` indexes exactly the paragraphs
+belonging to the sampled questions. For question Q, its two gold paragraphs are
+the ones HotpotQA selected *because they contain the answer*, and nothing else
+in the index concerns that topic except Q's own eight distractors. Dense
+retrieval returns them at rank 1–2 essentially always.
+
+Two hypotheses were tested and rejected:
+
+* **Question type.** Bridge questions, which need a genuine second hop,
+  saturate as badly as comparison questions (82% vs 75% at coverage 1.00), with
+  the same median gold rank of 2. Filtering to bridge-only would not help.
+* **Corpus size.** Scaling back to 2000 questions would cost ~12 days of ingest
+  and probably change nothing: adding *unrelated* passages does not hide a
+  question's topical gold, and the hard distractors that matter are already
+  indexed.
+
+**Decision.** `TOP_K` 5 → 2. At k=2, recall of both gold passages is 67%
+overall and 59% on bridge questions, so roughly 35% of queries genuinely need a
+second retrieval.
+
+**Why this is regime selection, not result tuning.** The distinction matters,
+because [D-21] rejects exactly this move when applied to λ.
+
+* k applies **identically to all three arms**. It cannot advantage CAES.
+* The gate never reads k, and no policy branches on it.
+* The direction was chosen from a *measured property of the retrieval task* —
+  recall was saturated — not from looking at which setting made CAES win. No
+  outcome was observed at k=2 before committing to it.
+* At k=5 the experiment is not merely unflattering, it is **unable to test its
+  own hypothesis**: if one retrieval always suffices, no stopping rule can
+  differ from any other, and CAES, Fixed(1), and a coin flip all produce
+  identical evidence sets.
+
+Contrast with tuning λ toward a better-looking iteration histogram, which
+[D-21] forbids: that optimises a property *of the figure* after seeing results.
+This chooses the operating point at which the question is answerable at all,
+before any result exists.
+
+**What it costs.** Absolute F1 falls for every policy, because two chunks is
+thinner evidence than five. The comparison is unaffected — all arms lose the
+same evidence — but absolute numbers are further from published HotpotQA
+baselines than [D-24]'s corpus reduction already put them. Recorded in
+METHODOLOGY §10 (External).
+
+**Consequences.**
+
+* Calibration must be re-run. It is ~30 LLM calls, and the cached query
+  embeddings replay free, so only the verifier calls are new.
+* Any λ tuned before this change is invalid — but none exists yet, which is
+  precisely why calibration runs before tuning.
+* If calibration still fails at k=2, the rubric becomes the next suspect, and
+  *then* editing `VERIFIER_PROMPT` is the right move under invariant 9.
+
+---
+
+### [D-26] Gold-passage recall is recorded per iteration
+
+**Context.** DECISIONS §8 open question 3 has been open since the first build:
+a low F1 is ambiguous between *the gate stopped too early* and *retrieval never
+surfaced the supporting passage*. Those call for opposite fixes — a lower λ
+versus a better retriever — and nothing in the results distinguished them.
+
+[D-25] is the proof that this matters. The single most consequential finding in
+the project so far was recoverable only by reconstructing recall after the fact
+from cached embeddings. Had that reconstruction been impossible, the obvious
+move would have been to "sharpen the rubric" — damaging a correct instrument to
+compensate for a trivial retrieval task.
+
+**Decision.** `graph.gold_recall` computes the fraction of a question's
+`supporting_facts` titles present in the evidence, and `node_retrieve` records
+it **every iteration** into `gold_recall_history`. `state_summary` exports the
+series and its final value; `calibrate_verifier.py` reports it alongside the
+coverage distribution.
+
+**The ground-truth firewall.** Supporting-fact titles are the answer key. A
+policy that could see them would be choosing its depth from the answer, which
+would invalidate every result in the paper. So:
+
+* `gold_titles` enters through `run_query` and lives in state, but is read by
+  exactly one function, which returns a number nothing else consumes;
+* `evaluate_gate`, `route_from_state` and the verify node never reference it,
+  pinned by `test_gold_titles_are_invisible_to_the_gate`, which greps their
+  source;
+* an unlabelled run records `-1.0`, so "no ground truth available" is
+  distinguishable from "retrieved nothing" rather than silently reading as a
+  failed retrieval.
+
+**Consequences.** Every per-query record gains a recall series. This turns the
+retrieval-versus-gate question from an argument into a column, and it is the
+highest-value addition to the results section — open question 3 said so before
+this was built; [D-25] demonstrated it.
+
+---
+
 ## 6. Traps
 
 Things that will cost you time, in rough order of likelihood.
@@ -909,7 +1026,7 @@ Things that will cost you time, in rough order of likelihood.
 | Every CAES query stops at the same iteration | λ is far outside the sensitive region | Check `caes_decisions.jsonl`: if `lambda_times_delta_c` dwarfs `delta_q` everywhere, λ is too high |
 | λ sweep says "DEGENERATE" | F1 flat — usually still in `DRY_RUN` | Run with real responses |
 | λ sweep warns "degenerate on spread" | recommended λ puts >90% of queries in one iteration bucket | Compare against the best-spread λ it names; see **[D-21]** |
-| Coverage all lands in one band | rubric not discriminating | Sharpen `VERIFIER_PROMPT`; this is a Phase 2 blocker, not cosmetic |
+| Coverage all lands in one band | rubric not discriminating **or the retrieval task is trivial** | Check `gold_recall` FIRST. At 100% recall the verifier is right and the corpus is too easy — sharpening the rubric would damage a working instrument. See **[D-25]** |
 | Ledger seems stuck | it is cumulative and persistent, by design | `python -c "from costs import TRACKER; print(TRACKER.summary())"` |
 
 ### The one that is hardest to notice
@@ -955,11 +1072,12 @@ Genuinely undecided, flagged so nobody assumes they were settled.
    iteration 1 because the evidence set — and therefore the verifier prompt —
    has grown. A monotone cost model might be more accurate. Check
    `cost_history` from a real run before assuming it matters.
-3. **Retrieval failure and gate failure are currently indistinguishable.** A low
-   F1 could mean the gate stopped too early *or* that retrieval never surfaced
-   the supporting passage. Recording precision-at-k against HotpotQA's
-   `supporting_titles` would separate them. This is the highest-value addition
-   to the results section.
+3. ~~**Retrieval failure and gate failure are currently indistinguishable.**~~
+   **RESOLVED 2026-08-31 — see [D-26].** Gold-passage recall against
+   `supporting_facts` is now recorded every iteration in `gold_recall_history`.
+   It was worth more than anticipated: reconstructing it after the fact is what
+   revealed that [D-25]'s calibration failure was a trivial retrieval task
+   rather than a blunt rubric.
 4. **One-shot's complexity score is hand-built.** The spec permitted a small
    Haiku call instead. The current heuristic is free and deterministic, but if
    B2 routes nearly every question to the same depth on real data, the baseline

@@ -130,3 +130,32 @@ def test_confidence_short_circuit_works_when_enabled(monkeypatch, stubbed):
                                 honor_confidence=True)
     assert final["iteration"] == 1
     assert final["stop_reason"] == "confident"
+
+
+def test_gold_titles_are_invisible_to_the_gate():
+    """Instrumentation must not leak into the decision.
+
+    `gold_recall` answers DECISIONS open question 3, but the supporting-fact
+    titles are ground truth: a policy that could see them would be choosing its
+    depth from the answer key, which would invalidate every result.
+    """
+    import inspect
+
+    import graph
+
+    for name in ("evaluate_gate", "route_from_state", "make_verify_node"):
+        src = inspect.getsource(getattr(graph, name))
+        assert "gold" not in src, (
+            f"graph.{name} references gold titles; the gate must never see "
+            f"ground truth")
+
+    # And the recall figure itself is derivable without touching the policy.
+    class Chunk:
+        def __init__(self, title):
+            self.title = title
+
+    assert graph.gold_recall([Chunk("A"), Chunk("B")], ["A", "B"]) == 1.0
+    assert graph.gold_recall([Chunk("A")], ["A", "B"]) == 0.5
+    assert graph.gold_recall([Chunk("Z")], ["A", "B"]) == 0.0
+    assert graph.gold_recall([Chunk("A")], None) == -1.0, \
+        "an unlabelled run must be distinguishable from a failed retrieval"

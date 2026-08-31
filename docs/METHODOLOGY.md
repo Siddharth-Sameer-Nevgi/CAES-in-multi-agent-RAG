@@ -328,6 +328,12 @@ happened, not merely that costs differed.
 
 **Internal.**
 
+* Retrieval quality and gate quality are now separable: gold-passage recall
+  against `supporting_facts` is recorded every iteration, so a low F1 can be
+  attributed to the gate stopping early or to retrieval never surfacing the
+  passage. The titles are ground truth and are firewalled from the policy and
+  the gate, pinned by test. See **[D-26]**.
+
 * The ΔQ estimator is a one-step linear extrapolation with a fixed decay factor;
   that factor is set a priori and not tuned — conservative, but arbitrary.
 * Running-max smoothing biases ΔQ upward on noisy trajectories, making the gate
@@ -344,6 +350,15 @@ happened, not merely that costs differed.
   `gemini-embedding-001` for retrieval), single price point. The direction of
   the result should generalise; the magnitude is specific to this cost
   structure.
+* **`TOP_K` is 2, not 5.** At k=5 gold-passage recall on this corpus was
+  measured at **100%**, with the harder of the two supporting passages at
+  median rank 2 — a single retrieval was sufficient by construction, leaving no
+  decision for any stopping rule to make. k=2 puts roughly 35% of questions in
+  a regime where a second retrieval is genuinely required. It applies
+  identically to all three arms and the gate never reads it, so it selects the
+  operating point rather than favouring a policy; but two chunks is thinner
+  evidence than five, so absolute F1 is lower for every arm. See
+  [DECISIONS.md](DECISIONS.md) **[D-25]**.
 * **The corpus is a 500-question sample of HotpotQA, not 2000.** The evaluation
   split is unaffected — still 50 tuning and 150 test questions — but the
   *distractor pool* those questions are retrieved against is four times

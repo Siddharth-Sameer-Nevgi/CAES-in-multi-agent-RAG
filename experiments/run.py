@@ -169,7 +169,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with TRACKER.run_budget(args.max_usd, name=f"run-{args.policy}"):
                 for i, q in enumerate(todo, 1):
-                    final = run_query(q["question"], policy, query_id=q["id"])
+                    final = run_query(q["question"], policy,
+                                     query_id=q["id"],
+                                     gold_titles=q.get("supporting_titles"))
                     rec = state_summary(final)
                     rec["gold_answer"] = q["answer"]
                     rec.update(score(rec["answer"], q["answer"]))
