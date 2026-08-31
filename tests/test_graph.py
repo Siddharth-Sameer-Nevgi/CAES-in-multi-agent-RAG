@@ -159,3 +159,46 @@ def test_gold_titles_are_invisible_to_the_gate():
     assert graph.gold_recall([Chunk("Z")], ["A", "B"]) == 0.0
     assert graph.gold_recall([Chunk("A")], None) == -1.0, \
         "an unlabelled run must be distinguishable from a failed retrieval"
+
+
+def test_each_iteration_adds_new_evidence(monkeypatch):
+    """An iteration that adds no evidence cannot move coverage.
+
+    Retrieving exactly TOP_K and filtering seen chunks afterwards can return
+    nothing new, which makes dQ structurally zero and every later iteration
+    dead. Retrieval must search deep enough to yield TOP_K unseen chunks.
+    """
+    import config
+    import graph
+    from retrieval import Chunk
+
+    class RankedRetriever:
+        """Returns the same global ranking every time, as a real index would
+        for a query whose planner output barely changed."""
+
+        def __init__(self):
+            self.depths = []
+
+        def search(self, query, k=5, **kw):
+            self.depths.append(k)
+            return [Chunk(chunk_id=str(i), title=f"T{i}", text=f"body {i}",
+                          score=1.0 - i / 100) for i in range(k)]
+
+    r = RankedRetriever()
+    monkeypatch.setattr(graph, "get_retriever", lambda: r)
+    monkeypatch.setattr(config, "TOP_K", 2)
+
+    state = graph.initial_state("q", query_id="q1")
+    state["query"] = "q"
+    for it in range(1, 4):
+        state["iteration"] = it
+        state.update(graph.node_retrieve(state))
+
+    assert state["new_chunks_history"] == [2, 2, 2], (
+        f"iterations added {state['new_chunks_history']} chunks; an iteration "
+        f"adding 0 is dead and makes dQ structurally zero")
+    assert len(state["evidence"]) == 6
+    assert len(set(state["seen_chunk_ids"])) == 6, "duplicate chunks in evidence"
+    assert r.depths == [2, 4, 6], (
+        "search depth must grow with what has been seen, or the filter can "
+        "return nothing new")

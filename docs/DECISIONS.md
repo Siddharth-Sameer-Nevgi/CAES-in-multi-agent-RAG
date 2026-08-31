@@ -1005,6 +1005,94 @@ this was built; [D-25] demonstrated it.
 
 ---
 
+### [D-27] Retrieval searches deep enough to return TOP_K *unseen* chunks
+
+**Context.** Calibration phase B measured coverage trajectories for the first
+time and found every one of them frozen:
+
+```
+0.40 -> 0.63 -> 0.63 -> 0.63 -> 0.63
+0.20 -> 0.62 -> 0.62 -> 0.62 -> 0.62
+0.40 -> 0.40 -> 0.40 -> 0.40 -> 0.40
+```
+
+Coverage moved at most once, between iterations 1 and 2, then never again.
+Three measurements identified the cause and ruled out the verifier:
+
+| Signal | Reading |
+|---|---|
+| Gold recall per iteration | **flat for 15/15 queries** — 0 ever improved |
+| Cost per iteration | 0.000333, 0.000377, 0.000378, 0.000378, 0.000378 |
+| Verifier spend | trivial after iteration 2 — the calls were cache hits |
+
+A growing evidence set makes the verifier prompt grow, so cost must rise with
+depth. It did not. Identical prompts hit the cache and returned identical
+coverage. **The evidence set was not growing.**
+
+**The defect.** `node_retrieve` searched exactly `TOP_K` deep and then filtered
+out chunks already in evidence:
+
+```python
+hits  = search(query, k=config.TOP_K)
+fresh = [c for c in hits if c.chunk_id not in seen]   # can be EMPTY
+```
+
+When a later iteration's query ranks the same chunks first — which is the
+normal case, since the planner rewrites a query about the same question over
+the same index — every hit is filtered and `fresh` is empty. The iteration
+still pays for a planner call, a query embedding and a verifier call, and adds
+nothing.
+
+**Decision.** Search `TOP_K + len(seen)` deep and take the first `TOP_K` unseen
+hits. Every iteration then adds `TOP_K` new chunks until the corpus is
+exhausted.
+
+**Why this is a correctness defect and not a tuning knob.** A dead iteration
+makes ΔQ **structurally zero**, not merely small:
+
+* coverage cannot move, because the verifier sees byte-identical evidence;
+* so ΔQ ≈ 0 from the first dead iteration onward, for every query;
+* so the gate's margin has a constant sign and CAES degenerates to a
+  fixed-depth policy — the exact failure **[D-21]** describes, arriving through
+  retrieval instead of through λ;
+* and **the baselines are corrupted too**: `FixedPolicy(n=3)` pays for three
+  iterations while holding iteration 2's evidence, so the headline "CAES costs
+  less at equal F1" would have been trivially true and completely uninformative.
+
+It would not have been visible in the results. F1 and cost would both be real
+numbers, the figures would render, and the only symptom is a cost reduction
+that measures nothing. This is the class of failure **[D-21]** and §6 warn
+about, and it was caught only because the trajectory measurement added in the
+same session made the evidence set's behaviour observable.
+
+**Why TOP_K=2 exposed it.** The defect predates [D-25] but was masked at
+`TOP_K=5`: a deeper slice is more likely to contain something unseen, so
+evidence limped along instead of stopping dead. Lowering k to 2 turned an
+intermittent stall into a total one. The bug was always wrong; it was only ever
+partly hidden.
+
+**Instrumentation added.** `new_chunks_history` records chunks added per
+iteration and `dead_iterations` counts the zeros, both in every per-query
+record. A dead iteration is now a number in the results rather than an
+inference from flat cost. Guarded by
+`tests/test_graph.py::test_each_iteration_adds_new_evidence`, which pins that
+search depth grows with what has been seen.
+
+**Rejected.** Varying the planner prompt to force query diversity (treats the
+symptom — the retriever should return new evidence regardless of how similar
+two queries are); dropping the seen-filter and allowing duplicate evidence
+(inflates the evidence set without adding information, and doubles the
+verifier's prompt cost for nothing).
+
+**Consequences.** Every iteration now genuinely deepens the evidence set, so
+per-iteration cost grows with depth as METHODOLOGY §3.2 assumes. Calibration
+must be re-run; the cached calls replay free, and only the newly reachable
+chunks cost quota. Any measurement taken before this fix — including both
+earlier calibration runs — describes a system whose iterations after the first
+did nothing.
+
+---
+
 ## 6. Traps
 
 Things that will cost you time, in rough order of likelihood.
@@ -1027,6 +1115,7 @@ Things that will cost you time, in rough order of likelihood.
 | λ sweep says "DEGENERATE" | F1 flat — usually still in `DRY_RUN` | Run with real responses |
 | λ sweep warns "degenerate on spread" | recommended λ puts >90% of queries in one iteration bucket | Compare against the best-spread λ it names; see **[D-21]** |
 | Coverage all lands in one band | rubric not discriminating **or the retrieval task is trivial** | Check `gold_recall` FIRST. At 100% recall the verifier is right and the corpus is too easy — sharpening the rubric would damage a working instrument. See **[D-25]** |
+| Coverage frozen after iteration 2 | iterations are adding no evidence | Check `new_chunks_history` for zeros and whether per-iteration cost stops growing. See **[D-27]** |
 | Ledger seems stuck | it is cumulative and persistent, by design | `python -c "from costs import TRACKER; print(TRACKER.summary())"` |
 
 ### The one that is hardest to notice

@@ -46,6 +46,7 @@ class State(TypedDict, total=False):
     # --- instrumentation only, never read by the gate ---
     gold_titles: list[str]          # HotpotQA supporting_facts titles
     gold_recall_history: list[float]
+    new_chunks_history: list[int]   # chunks ADDED per iteration; 0 == dead iteration
     total_usd: float
     total_latency_ms: float
     _route: str                    # "retrieve" | "generate", set by verify
@@ -77,6 +78,7 @@ def initial_state(question: str, query_id: str = "", policy: str = "",
         parse_failures=0,
         gold_titles=list(gold_titles or []),
         gold_recall_history=[],
+        new_chunks_history=[],
         total_usd=0.0,
         total_latency_ms=0.0,
         _route="",
@@ -113,18 +115,40 @@ def node_plan(state: State) -> dict[str, Any]:
 
 
 def node_retrieve(state: State) -> dict[str, Any]:
+    """Add up to TOP_K chunks this query has not already seen.
+
+    Retrieval goes `TOP_K + len(seen)` deep and then takes the first TOP_K
+    unseen hits, rather than retrieving exactly TOP_K and filtering afterwards.
+
+    The difference is not cosmetic. Filtering after a fixed-depth search can
+    yield ZERO new chunks -- if the top-k for this iteration's query are all
+    already in evidence, the iteration pays for a planner call, a query
+    embedding and a verifier call while the evidence set is unchanged. The
+    verifier then sees a byte-identical prompt, returns the same coverage from
+    cache, and dQ is structurally zero. Every iteration after the first such
+    one is dead: it cannot raise coverage, so the gate has nothing to decide
+    and a fixed-depth baseline pays N times for one iteration's evidence.
+
+    Measured before the fix, at TOP_K=2: gold recall was flat across all five
+    iterations for 15/15 queries, and per-iteration cost stopped growing after
+    iteration 2 because the prompts were cache hits. See DECISIONS [D-27].
+    """
+    seen = set(state["seen_chunk_ids"])
+    depth = config.TOP_K + len(seen)
     hits = get_retriever().search(
-        state["query"], k=config.TOP_K, query_id=state["query_id"],
+        state["query"], k=depth, query_id=state["query_id"],
         iteration=state["iteration"], policy=state.get("policy", ""),
     )
-    seen = set(state["seen_chunk_ids"])
-    fresh = [c for c in hits if c.chunk_id not in seen]
+    fresh = [c for c in hits if c.chunk_id not in seen][:config.TOP_K]
     evidence = state["evidence"] + fresh
-    log.debug("[%s it%d] retrieved %d hits, %d new",
-              state["query_id"], state["iteration"], len(hits), len(fresh))
+    log.debug("[%s it%d] searched depth %d, %d new (evidence now %d)",
+              state["query_id"], state["iteration"], depth, len(fresh),
+              len(evidence))
     return {
         "evidence": evidence,
         "seen_chunk_ids": state["seen_chunk_ids"] + [c.chunk_id for c in fresh],
+        "new_chunks_history": (state.get("new_chunks_history", [])
+                               + [len(fresh)]),
         "gold_recall_history": (state.get("gold_recall_history", [])
                                 + [gold_recall(evidence, state.get("gold_titles"))]),
     }
@@ -352,6 +376,9 @@ def state_summary(state: State) -> dict[str, Any]:
         "n_evidence": len(state["evidence"]),
         "parse_failures": state.get("parse_failures", 0),
         "gold_recall_history": state.get("gold_recall_history", []),
+        "new_chunks_history": state.get("new_chunks_history", []),
+        "dead_iterations": sum(1 for n in state.get("new_chunks_history", [])
+                               if n == 0),
         "final_gold_recall": (state["gold_recall_history"][-1]
                               if state.get("gold_recall_history") else -1.0),
         "answer": state.get("answer") or "",
