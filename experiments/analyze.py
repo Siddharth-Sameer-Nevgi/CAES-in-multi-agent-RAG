@@ -44,8 +44,24 @@ GRID = "#e4e3df"
 # Loading
 # ---------------------------------------------------------------------------
 
-def load_policy(policy: str) -> list[dict]:
-    path = config.RESULTS_DIR / f"{policy}_raw.jsonl"
+def load_policy(policy: str, split: str = "test",
+                lam: float | None = None) -> list[dict]:
+    """Load one policy's per-query records for a given split.
+
+    The path is resolved by `experiments.run.raw_path`, deliberately imported
+    rather than reconstructed: analysis reading a different filename than the
+    driver wrote is how [D-29] happened on the run side, and duplicating the
+    naming rule here would set up the same failure on the analysis side.
+
+    A lambda-suffixed diagnostic file is preferred when `lam` is given, so a
+    tune-split preview can be built from `--lam` runs without those runs ever
+    being mistaken for the frozen-lambda test artifacts.
+    """
+    from experiments.run import raw_path
+
+    path = raw_path(policy, split, lam if policy == "caes" else None)
+    if not path.exists() and lam is not None and policy == "caes":
+        path = raw_path(policy, split, None)
     if not path.exists():
         return []
     out, seen = [], set()
@@ -65,8 +81,8 @@ def load_policy(policy: str) -> list[dict]:
     return out
 
 
-def load_all() -> dict[str, list[dict]]:
-    return {p: load_policy(p) for p in POLICIES}
+def load_all(split: str = "test", lam: float | None = None) -> dict[str, list[dict]]:
+    return {p: load_policy(p, split, lam) for p in POLICIES}
 
 
 def paired(a: list[dict], b: list[dict], field: str):
@@ -229,8 +245,11 @@ def _new_fig(size=(7.2, 4.6)):
     return fig, ax
 
 
+FIG_PREFIX = ""
+
+
 def _save(fig, name: str) -> Path:
-    path = config.FIGURES_DIR / name
+    path = config.FIGURES_DIR / f"{FIG_PREFIX}{name}"
     fig.tight_layout()
     fig.savefig(path, facecolor=SURFACE, bbox_inches="tight")
     import matplotlib.pyplot as plt
@@ -392,9 +411,29 @@ def fig_lambda_sweep() -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-figures", action="store_true")
+    # Analysis must name the split it read, for the same reason the driver
+    # must name the split it wrote. See DECISIONS [D-29].
+    ap.add_argument("--split", choices=["test", "tune"], default="test",
+                    help="which split's results to analyse (default: test)")
+    ap.add_argument("--lam", type=float, default=None,
+                    help="read a --lam diagnostic CAES file (tune previews)")
     args = ap.parse_args(argv)
 
-    data = load_all()
+    banner = f"ANALYSING THE {args.split.upper()} SPLIT"
+    if args.split == "tune":
+        banner += "  -- PREVIEW ONLY, not the headline experiment"
+    if args.lam is not None:
+        banner += f"   (CAES at lambda={args.lam:g})"
+    print("=" * len(banner))
+    print(banner)
+    print("=" * len(banner))
+    print()
+
+    if args.split != "test":
+        global FIG_PREFIX
+        FIG_PREFIX = f"{args.split}_"
+
+    data = load_all(args.split, args.lam)
     missing = [p for p in POLICIES if not data.get(p)]
     if missing:
         print(f"WARNING: no results for {', '.join(missing)}. "
