@@ -40,7 +40,15 @@ MIN_RANGE = 0.40
 MAX_SINGLE_BIN_SHARE = 0.60
 
 # Trajectory criteria (phase B). dQ needs coverage to actually move.
-MIN_TOTAL_RISE = 0.05      # mean coverage must climb this much from it1 to itN
+#
+# Measured on the RUNNING-MAX SMOOTHED series, because that is the series the
+# gate consumes: CAESPolicy.decide calls smooth_coverage() and feeds the result
+# to estimate_delta_q (METHODOLOGY 3.1). Judging the raw series would fail a
+# verifier whose smoothed signal is perfectly usable -- coverage genuinely dips
+# when a newly retrieved document introduces a second plausible entity, which
+# is the whole reason smoothing exists. The raw series is still reported, and
+# its volatility is a real finding worth watching (see the verdict text).
+MIN_TOTAL_RISE = 0.05      # smoothed mean coverage must climb this much
 MIN_MOVING_SHARE = 0.25    # fraction of queries whose coverage rises at all
 
 
@@ -138,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
                         "question": q["question"],
                         "coverage_history": summ["coverage_history"],
                         "gold_recall_history": summ["gold_recall_history"],
+                        "new_chunks_history": summ.get("new_chunks_history", []),
                         "cost_history": summ["cost_history"],
                     })
                     cov = summ["coverage_history"]
@@ -204,19 +213,34 @@ def main(argv: list[str] | None = None) -> int:
         print("=" * 62)
         print(f"TRAJECTORIES  (n={len(trajectories)}, depth={depth})")
         print()
-        print("mean coverage per iteration -- the diminishing-returns premise:")
-        means = []
+        def running_max(seq):
+            out, best = [], float("-inf")
+            for c in seq:
+                best = max(best, c)
+                out.append(best)
+            return out
+
+        print("mean coverage per iteration -- the diminishing-returns premise.")
+        print("SMOOTHED is the series the gate differentiates; raw is shown "
+              "for audit.")
+        raw_means, sm_means = [], []
         for it in range(depth):
-            vals = [t["coverage_history"][it] for t in trajectories
-                    if len(t["coverage_history"]) > it]
-            m = statistics.mean(vals)
-            means.append(m)
-            delta = "" if it == 0 else f"   dQ_obs {m - means[it - 1]:+.3f}"
-            bar = "#" * int(round(m * 40))
-            print(f"  it{it + 1}  {m:.3f}  {bar}{delta}")
-        traj_rise = means[-1] - means[0]
+            rv = [t["coverage_history"][it] for t in trajectories
+                  if len(t["coverage_history"]) > it]
+            sv = [running_max(t["coverage_history"])[it] for t in trajectories
+                  if len(t["coverage_history"]) > it]
+            raw_means.append(statistics.mean(rv))
+            sm_means.append(statistics.mean(sv))
+            delta = ("" if it == 0
+                     else f"   dQ_obs {sm_means[it] - sm_means[it - 1]:+.3f}")
+            bar = "#" * int(round(sm_means[it] * 40))
+            print(f"  it{it + 1}  smooth {sm_means[it]:.3f}  "
+                  f"raw {raw_means[it]:.3f}  {bar}{delta}")
+        traj_rise = sm_means[-1] - sm_means[0]
+        raw_rise = raw_means[-1] - raw_means[0]
         print()
-        print(f"  total rise it1 -> it{depth}: {traj_rise:+.3f}")
+        print(f"  total rise it1 -> it{depth}:  smoothed {traj_rise:+.3f}   "
+              f"raw {raw_rise:+.3f}")
 
         gains = [max(t["coverage_history"]) - t["coverage_history"][0]
                  for t in trajectories]
@@ -224,6 +248,40 @@ def main(argv: list[str] | None = None) -> int:
         traj_moving = n_moving / len(gains)
         print(f"  queries whose coverage moves at all: "
               f"{n_moving}/{len(gains)} ({traj_moving:.0%})")
+
+        # Raw volatility. Smoothing makes dQ usable, but big dips mean the
+        # evidence set is being diluted, and the GENERATOR sees the raw diluted
+        # set. METHODOLOGY 10 flags that smoothing biases dQ upward; this
+        # quantifies it.
+        steps = [b - a for t in trajectories
+                 for a, b in zip(t["coverage_history"],
+                                 t["coverage_history"][1:])]
+        if steps:
+            drops = [d for d in steps if d < -0.01]
+            print(f"  raw volatility: mean |step| "
+                  f"{statistics.mean(abs(d) for d in steps):.3f}, "
+                  f"{len(drops)}/{len(steps)} steps drop, worst "
+                  f"{min(steps):+.2f}")
+
+        # Did the extra retrieval actually surface missing gold evidence?
+        gr0 = [t["gold_recall_history"][0] for t in trajectories
+               if t.get("gold_recall_history")]
+        grN = [t["gold_recall_history"][-1] for t in trajectories
+               if t.get("gold_recall_history")]
+        if gr0 and gr0[0] >= 0:
+            improved = sum(1 for t in trajectories
+                           if max(t["gold_recall_history"])
+                           > t["gold_recall_history"][0])
+            print(f"  gold recall: {statistics.mean(gr0):.3f} -> "
+                  f"{statistics.mean(grN):.3f}  "
+                  f"({improved}/{len(trajectories)} queries improved)")
+
+        dead = sum(1 for t in trajectories
+                   for n in t.get("new_chunks_history", []) if n == 0)
+        total_it = sum(len(t.get("new_chunks_history", [])) for t in trajectories)
+        if total_it:
+            print(f"  dead iterations (added no evidence): {dead}/{total_it}"
+                  + ("   <-- see [D-27]" if dead else ""))
 
         print()
         print("sample trajectories (raw, then running-max smoothed):")
@@ -261,8 +319,9 @@ def main(argv: list[str] | None = None) -> int:
     if trajectories:
         if traj_rise is not None and traj_rise < MIN_TOTAL_RISE:
             traj_failures.append(
-                f"mean coverage rises only {traj_rise:+.3f} across iterations "
-                f"(need {MIN_TOTAL_RISE:+.2f}) -- dQ has nothing to extrapolate")
+                f"SMOOTHED mean coverage rises only {traj_rise:+.3f} across "
+                f"iterations (need {MIN_TOTAL_RISE:+.2f}) -- dQ has nothing to "
+                f"extrapolate")
         if traj_moving is not None and traj_moving < MIN_MOVING_SHARE:
             traj_failures.append(
                 f"only {traj_moving:.0%} of queries move at all "
