@@ -740,6 +740,29 @@ Three options, none free of cost:
 the invariant it breaks on every affected call, and must be opted into
 knowingly.
 
+**Refined 2026-08-31, once the real quota was known (see [D-24]).** Option 3 as
+originally written doubled a 4,500-request ingest against a 1,000/day embedding
+quota — nine days instead of four and a half. The refinement rests on a
+distinction the original framing missed:
+
+> **Corpus embeddings are not on the ΔC path. Query embeddings are.**
+
+`retrieval.py` embeds a query on every iteration, and that cost *is* part of
+measured ΔC — so it stays measured per call, no change. Corpus embeddings are a
+one-time ingest cost whose **per-chunk** attribution reaches no reported number
+anywhere; only the aggregate is ever printed or stored. So ingest now:
+
+* measures the aggregate **exactly**, with one batched `:countTokens` per batch
+  of 50 chunks — 90 requests instead of 4,500, and the reported ingest cost is
+  a measured number, not an estimate;
+* attributes per-chunk tokens with the estimator, and stamps
+  `per_chunk_tokens_estimated: true` into `data/meta.json` so the choice is
+  auditable from the artifact.
+
+Invariant 4 is preserved everywhere it applies. This is not the invariant being
+relaxed — it is the invariant being applied to the quantity it was written
+about.
+
 **Why measured is worth the request.** `countTokens` is free and its result is
 written into the same cache entry as the embedding, so it is paid once per
 unique text and never again — a re-run or a resumed ingest costs nothing extra.
@@ -755,7 +778,8 @@ is a *research* trade-off — a stated deviation from invariant 4 affecting a
 term worth well under 1% of ΔC — and should be recorded as such, not made
 silently. Measure the real limits before deciding.
 
-**Consequences.** Cold ingest issues two requests per chunk. Warm ingest issues
+**Consequences.** Cold ingest issues one embedding request per chunk plus one
+batched count per batch (~1.02 requests per chunk, not 2). Warm ingest issues
 none. A `countTokens` response without `totalTokens` is fatal, on the same
 reasoning as [D-2]. Guarded by
 `tests/test_provider.py::test_gemini_embed_token_count_is_measured_not_estimated`

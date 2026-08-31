@@ -420,12 +420,18 @@ def _call_embed(body: dict[str, Any]) -> dict[str, Any]:
     return _bedrock_invoke(config.MODEL_EMBED, body)
 
 
-def _parse_embed(payload: dict[str, Any], text: str,
-                 est_tokens: int) -> tuple[np.ndarray, int]:
+def _parse_embed(payload: dict[str, Any], text: str, est_tokens: int,
+                 *, measure_tokens: bool = True) -> tuple[np.ndarray, int]:
     """Return (vector, input_tokens).
 
     Gemini's :embedContent returns no token count at all, so the count is
-    measured with a separate free :countTokens call. See DECISIONS [D-23].
+    measured with a separate :countTokens call. See DECISIONS [D-23].
+
+    `measure_tokens=False` skips that extra request and attributes the
+    estimator's count to this text. Only correct where the PER-TEXT number
+    reaches nothing that matters and the aggregate is measured some other way
+    -- corpus ingest is the sole such caller. Query embeddings, which are on
+    the dC path, must never use it.
     """
     if config.PROVIDER == "gemini":
         values = (payload.get("embedding") or {}).get("values")
@@ -435,10 +441,34 @@ def _parse_embed(payload: dict[str, Any], text: str,
                 f"{json.dumps(payload)[:300]}"
             )
         vec = np.asarray(values, dtype="float32")
+        if not measure_tokens:
+            return vec, est_tokens
         return vec, _gemini_embed_tokens(text, est_tokens)
 
     vec = np.asarray(payload["embedding"], dtype="float32")
     return vec, int(payload.get("inputTextTokenCount", est_tokens))
+
+
+def count_tokens(texts: list[str], model: str | None = None) -> int:
+    """Exact aggregate token count for many texts in ONE request.
+
+    :countTokens takes a list of contents and returns their total, so the whole
+    ingest corpus can be measured in one request per batch instead of one per
+    chunk. Used where only the AGGREGATE matters -- see DECISIONS [D-23].
+    """
+    if config.PROVIDER != "gemini":
+        raise NotImplementedError("count_tokens is a Gemini-only helper")
+    model = model or config.MODEL_EMBED
+    payload = _gemini_post(
+        "countTokens", model,
+        {"contents": [{"parts": [{"text": t}]} for t in texts]})
+    if "totalTokens" not in payload:
+        raise RuntimeError(
+            "Gemini countTokens returned no totalTokens. Measured cost is a "
+            "core claim of this work; refusing to fall back to an estimate. "
+            "(DECISIONS [D-2], [D-23])"
+        )
+    return int(payload["totalTokens"])
 
 
 def _gemini_embed_tokens(text: str, est_tokens: int) -> int:
@@ -572,6 +602,7 @@ def embed(
     query_id: str = "",
     iteration: int = 0,
     policy: str = "",
+    measure_tokens: bool = True,
 ) -> np.ndarray:
     """Embed texts, returning L2-normalised float32 vectors.
 
@@ -609,7 +640,8 @@ def embed(
         else:
             payload = _call_embed(body)
             latency_ms = (time.perf_counter() - t0) * 1000.0
-            vec, in_tokens = _parse_embed(payload, text, est_tokens)
+            vec, in_tokens = _parse_embed(payload, text, est_tokens,
+                                          measure_tokens=measure_tokens)
             usd = TRACKER.record_embed(
                 in_tokens=in_tokens, latency_ms=latency_ms, query_id=query_id,
                 iteration=iteration, policy=policy,
@@ -670,6 +702,24 @@ def check_provider() -> int:
     print(f"matches config.EMBED_DIM : {dim == config.EMBED_DIM}")
     print(f"L2 norm after normalise  : {norm:.6f}")
     print(f"latency                  : {(time.perf_counter() - t0) * 1000:.0f} ms")
+
+    if config.PROVIDER == "gemini":
+        print("\n--- Batched countTokens (the ingest cost path) ---")
+        probes = ["alpha beta gamma delta", "epsilon zeta eta theta",
+                  "iota kappa lambda mu"]
+        try:
+            batched = count_tokens(probes)
+            singles = [count_tokens([t]) for t in probes]
+            print(f"batched total            : {batched} for {len(probes)} texts")
+            print(f"sum of individual counts : {sum(singles)} {singles}")
+            print(f"batching is exact        : {batched == sum(singles)}")
+        except Exception as exc:                            # noqa: BLE001
+            print(f"batched countTokens      : FAILED - "
+                  f"{type(exc).__name__}: {str(exc)[:180]}")
+            print("  Ingest measures its total token count this way. If the "
+                  "batch form is unsupported it falls back to one countTokens "
+                  "per chunk, which doubles the ingest day count.")
+            return 1
 
     print(f"\nledger cumulative        : ${TRACKER.cumulative():.6f}")
     if dim != config.EMBED_DIM:

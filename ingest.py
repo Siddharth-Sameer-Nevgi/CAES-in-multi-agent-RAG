@@ -97,7 +97,21 @@ def build_chunks(passages: list[dict]) -> list[dict]:
     return chunks
 
 
-def embed_chunks(chunks: list[dict], batch: int = config.EMBED_BATCH) -> np.ndarray:
+def embed_chunks(chunks: list[dict],
+                 batch: int = config.EMBED_BATCH) -> tuple[np.ndarray, int]:
+    """Embed every chunk. Returns (vectors, exact_total_input_tokens).
+
+    Corpus embeddings are a one-time ingest cost and are NOT on the dC path --
+    only the per-iteration query embedding is. So the per-chunk token count
+    reaches no reported result, and paying one :countTokens request per chunk
+    to measure it would double a 4,500-request ingest against a 1,000/day
+    quota for nothing.
+
+    Instead the aggregate -- which IS reported -- is measured exactly with one
+    batched :countTokens per batch of chunks, and per-chunk attribution falls
+    back to the estimator. Invariant 4 is preserved where it applies. See
+    DECISIONS [D-23].
+    """
     import llm
     try:
         from tqdm import tqdm
@@ -106,12 +120,22 @@ def embed_chunks(chunks: list[dict], batch: int = config.EMBED_BATCH) -> np.ndar
             return x
 
     vecs = np.zeros((len(chunks), config.EMBED_DIM), dtype="float32")
+    total_tokens = 0
     for start in tqdm(range(0, len(chunks), batch), desc="embedding",
                       unit="batch"):
         window = chunks[start:start + batch]
-        vecs[start:start + len(window)] = llm.embed(
-            [c["text"] for c in window], policy="ingest")
-    return vecs
+        texts = [c["text"] for c in window]
+        if config.PROVIDER == "gemini":
+            total_tokens += llm.count_tokens(texts)
+            vecs[start:start + len(window)] = llm.embed(
+                texts, policy="ingest", measure_tokens=False)
+        else:
+            # Titan returns inputTextTokenCount on every embedding response,
+            # so the per-chunk count is already measured and free.
+            block = llm.embed(texts, policy="ingest")
+            vecs[start:start + len(window)] = block
+            total_tokens = 0        # summed from the ledger instead
+    return vecs, total_tokens
 
 
 def build_index(vectors: np.ndarray):
@@ -179,8 +203,18 @@ def main(argv: list[str] | None = None) -> int:
           f"(cumulative so far ${TRACKER.cumulative():.2f} of "
           f"${config.HARD_BUDGET_USD:.2f})")
 
+    if config.PROVIDER == "gemini" and config.GEMINI_EMBED_RPD > 0:
+        # One embedContent per chunk, plus one batched countTokens per batch.
+        reqs = len(chunks) + -(-len(chunks) // config.EMBED_BATCH)
+        days = reqs / config.GEMINI_EMBED_RPD
+        print(f"Embedding requests: {reqs} against a "
+              f"{config.GEMINI_EMBED_RPD}/day cap -> {days:.1f} day(s)")
+        if days > 1.0:
+            print("This exceeds one day of quota. It will stop when the cap is "
+                  "hit; re-run tomorrow and it continues from cache for free.")
+
     try:
-        vectors = embed_chunks(chunks)
+        vectors, exact_tokens = embed_chunks(chunks)
     except llm.QuotaExhausted as exc:
         # Not a failure -- the day's allowance simply ran out. Every
         # embedding already computed is in the disk cache, so re-running
@@ -219,7 +253,21 @@ def main(argv: list[str] | None = None) -> int:
         "sample_size": args.sample,
         "split_seed": config.SPLIT_SEED,
         "dry_run": llm.DRY_RUN,
+        "provider": config.PROVIDER,
+        # Exact aggregate from batched countTokens. Per-chunk attribution in
+        # the ledger is estimated -- corpus embeddings are not on the dC path,
+        # so this total is the only embedding number ever reported. [D-23]
+        "embed_input_tokens_exact": exact_tokens,
+        "embed_usd_notional": round(
+            exact_tokens / 1000.0 * config.PRICE_EMBED_PER_1K, 8),
+        "per_chunk_tokens_estimated": config.PROVIDER == "gemini",
     }, indent=2), encoding="utf-8")
+
+    if exact_tokens:
+        print(f"Corpus embedded: {exact_tokens:,} input tokens "
+              f"(exact, batched countTokens) = "
+              f"${exact_tokens / 1000.0 * config.PRICE_EMBED_PER_1K:.4f} "
+              f"notional at list price.")
 
     if args.upload_s3:
         upload_to_s3(args.upload_s3, passages)
