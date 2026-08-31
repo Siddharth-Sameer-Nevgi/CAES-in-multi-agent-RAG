@@ -102,6 +102,13 @@ the rest of the protocol is unchanged and still free-tier:
 | Per-iteration observability | **CloudWatch** custom metrics (`--cloudwatch`) | free tier (10 metrics) |
 | Model serving | Google Gemini free tier | free |
 
+**Standing it up:** [deploy/README.md](deploy/README.md) is the runbook, and
+[deploy/iam-policy.json](deploy/iam-policy.json) is the least-privilege policy
+the account needs (S3 scoped to `caes-rag-*`, `PutMetricData` scoped by
+condition to the `CAES-RAG` namespace, EC2 limited to one host). Do it **before**
+the Phase 5 runs: CloudWatch metrics can only be emitted while a run happens,
+and re-running to add them costs days of free-tier quota.
+
 The t3.micro is the intended host: FAISS at 768 dims over ~20k chunks is ~60 MB
 resident, which fits its 1 GB comfortably — one of the reasons the embedding
 dimension is truncated rather than left at the default 3072.
