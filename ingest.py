@@ -234,10 +234,19 @@ def main(argv: list[str] | None = None) -> int:
           f"${config.HARD_BUDGET_USD:.2f})")
 
     if config.PROVIDER == "gemini" and config.GEMINI_EMBED_RPD > 0:
-        # One embedContent per chunk, plus one batched countTokens per batch.
-        reqs = len(chunks) + -(-len(chunks) // config.EMBED_BATCH)
+        # Count only what is still OUTSTANDING. Ingest is resumed daily, so
+        # projecting the whole corpus would tell a run that is 98% done it has
+        # five days left.
+        todo = sum(
+            1 for c in chunks
+            if CACHE.get(make_key(config.MODEL_EMBED,
+                                  llm._build_embed_body(c["text"]))) is None)
+        reqs = todo + -(-todo // config.EMBED_BATCH)
+        if todo < len(chunks):
+            print(f"Resuming: {len(chunks) - todo:,} of {len(chunks):,} chunks "
+                  f"already embedded ({1 - todo / len(chunks):.0%} done).")
         days = reqs / config.GEMINI_EMBED_RPD
-        print(f"Embedding requests: {reqs} against a "
+        print(f"Embedding requests outstanding: {reqs} against a "
               f"{config.GEMINI_EMBED_RPD}/day cap -> {days:.1f} day(s)")
         if days > 1.0:
             print("This exceeds one day of quota. It will stop when the cap is "

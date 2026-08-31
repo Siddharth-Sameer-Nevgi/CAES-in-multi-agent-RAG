@@ -754,3 +754,67 @@ comes from a `datasets` dependency on Windows, fires after the run has
 finished, and affects nothing.
 
 ---
+
+## [0.4.0] — 2026-08-31
+
+**Phase 1 complete. The corpus is ingested and the index is built.** First
+phase of the project to run against real data and real model responses.
+
+### Result
+
+| | |
+|---|---:|
+| Questions | 500 |
+| Deduplicated passages | 4,965 |
+| **Chunks embedded** | **5,552** |
+| Index | `IndexFlatIP`, 5,552 × 768, 17.1 MB |
+| Input tokens (exact) | **684,090** |
+| **Notional cost** | **$0.1026** |
+| **Actual billed** | **$0.00** |
+| Elapsed | 4 sessions across the daily embedding quota |
+
+`meta.json` carries **no `synthetic` stamp** and `dry_run: false` — this is the
+real HotpotQA corpus, not the devdata scaffold.
+
+### Verified after the fact
+
+* Index `ntotal` (5,552) equals `chunks.jsonl` length; dimension 768 matches
+  `config.EMBED_DIM`.
+* Splits: 50 tune, 150 test, **0 overlap**.
+* **Self-retrieval 5/5 at score exactly `1.0000`** — probing the index with a
+  chunk's own cached vector ranks that chunk first at unit cosine. This
+  confirms the re-normalisation in `llm.embed` works and that `IndexFlatIP`
+  really is cosine here, which was the risk [D-22] flagged when `EMBED_DIM`
+  moved to a Matryoshka-truncated 768.
+
+### The character-ratio estimator overestimates by 18.7%
+
+The ledger accrued **$0.1218** from per-chunk estimates while the batched
+`countTokens` measurement gives **$0.1026**. Actual is 4.99 chars/token against
+the estimator's assumed 3.6.
+
+This is the [D-23] split behaving exactly as designed — the *reported* corpus
+cost is the measured one, and the estimate never reaches a result. It is also a
+useful calibration of **[D-1]**: the pre-flight budget guard uses the same
+ratio, so it over-projects spend by roughly a fifth and therefore trips early.
+That is the direction [D-1] deliberately chose.
+
+### Retry logic exercised in anger
+
+Two `503 Service Unavailable` responses during the final batches were retried
+with backoff and recovered — the run completed without intervention.
+
+### Fixed
+
+- **The pre-flight projected the whole corpus, not the outstanding work.** A run
+  98% finished still announced "5,664 requests → 5.7 days". It now counts only
+  uncached chunks and prints resume progress: *"Resuming: 5,520 of 5,552 chunks
+  already embedded (99% done)."*
+
+### Note
+
+No `HF_TOKEN` is needed. `hotpotqa/hotpot_qa` is public, and the 914 MB local
+cache means subsequent loads take ~13 s from disk. The library's warning is
+generic advice, not a limit this project hit.
+
+---
