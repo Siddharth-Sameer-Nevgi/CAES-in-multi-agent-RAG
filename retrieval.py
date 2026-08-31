@@ -1,7 +1,7 @@
 """Dense retrieval over the FAISS index.
 
 The query embedding is a real cost and is a component of measured dC, so it
-goes through bedrock.embed like everything else.
+goes through llm.embed like everything else.
 """
 from __future__ import annotations
 
@@ -48,14 +48,45 @@ class Retriever:
                 f"Index/chunk mismatch: {self.index.ntotal} vectors vs "
                 f"{len(self.chunks)} chunks. Rebuild with `ingest.py --force`."
             )
-        log.info("Retriever ready: %d chunks", len(self.chunks))
+        # An index built by a different embedding model is the migration's
+        # sharpest failure mode: query and index vectors would be incomparable,
+        # which shows up as uniformly bad retrieval rather than as an error.
+        # Refuse loudly instead.
+        if self.index.d != config.EMBED_DIM:
+            raise ValueError(
+                f"Index dimension {self.index.d} does not match "
+                f"config.EMBED_DIM {config.EMBED_DIM} (provider "
+                f"{config.PROVIDER}, model {config.MODEL_EMBED}). This index "
+                f"was built by a different embedding model. Delete data/ and "
+                f"re-run `python ingest.py`."
+            )
+        self._warn_on_model_drift()
+        log.info("Retriever ready: %d chunks at %d dims (%s)",
+                 len(self.chunks), self.index.d, config.MODEL_EMBED)
+
+    @staticmethod
+    def _warn_on_model_drift() -> None:
+        """Same dimension, different model, is still incomparable geometry."""
+        if not config.META_PATH.exists():
+            return
+        try:
+            meta = json.loads(config.META_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        built_with = meta.get("embed_model")
+        if built_with and built_with != config.MODEL_EMBED:
+            log.warning(
+                "Index was built with %s but the active embedding model is %s. "
+                "Retrieval quality is not meaningful across models; rebuild "
+                "with `python ingest.py` after deleting data/.",
+                built_with, config.MODEL_EMBED)
 
     def search(self, query: str, k: int = config.TOP_K, *,
                query_id: str = "", iteration: int = 0,
                policy: str = "") -> list[Chunk]:
-        import bedrock
+        import llm
 
-        vec = bedrock.embed([query], query_id=query_id, iteration=iteration,
+        vec = llm.embed([query], query_id=query_id, iteration=iteration,
                             policy=policy)
         vec = np.ascontiguousarray(vec.astype("float32"))
         scores, ids = self.index.search(vec, k)

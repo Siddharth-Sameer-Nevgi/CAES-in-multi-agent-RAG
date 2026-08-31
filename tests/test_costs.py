@@ -1,59 +1,45 @@
-"""Phase 0 acceptance: the spend guards actually guard."""
+"""Phase 0 acceptance: the spend guards actually guard.
+
+Amounts are derived from `config` rather than written as literals, so the suite
+means the same thing under either provider's price table. The literal published
+prices are pinned separately, in test_provider.py.
+"""
 from __future__ import annotations
 
 import json
 
 import pytest
 
-import bedrock
 import cache as cache_mod
 import config
+import llm
 from costs import BudgetExceeded, CostTracker
+from tests.conftest import FakeBedrockClient, _Body
 
 
-@pytest.fixture()
-def tracker(tmp_path):
-    return CostTracker(ledger_path=tmp_path / "ledger.json",
-                       hard_budget_usd=1.00, warn_budget_usd=0.50)
+def _tokens_worth(usd: float) -> int:
+    """Input-token count costing roughly `usd` at the active price table."""
+    return int(round(usd * 1000.0 / config.PRICE_LLM_INPUT_PER_1K))
 
 
-class FakeClient:
-    """Stands in for bedrock-runtime. Records whether it was ever reached."""
-
-    def __init__(self, in_tokens=100, out_tokens=50):
-        self.calls = 0
-        self.in_tokens = in_tokens
-        self.out_tokens = out_tokens
-
-    def invoke_model(self, **kwargs):
-        self.calls += 1
-        payload = {
-            "content": [{"type": "text", "text": "fake answer"}],
-            "usage": {"input_tokens": self.in_tokens,
-                      "output_tokens": self.out_tokens},
-        }
-        return {"body": _Body(json.dumps(payload))}
-
-
-class _Body:
-    def __init__(self, s):
-        self._s = s
-
-    def read(self):
-        return self._s
-
-
-def test_estimate_matches_price_table(tracker):
-    # 1000 in, 1000 out => $0.001 + $0.005
-    assert tracker.estimate_llm_cost(1000, 1000) == pytest.approx(0.006)
+def test_estimate_applies_input_and_output_prices_to_the_right_side(tracker):
+    """Catches the classic swap, without restating the price table."""
+    assert tracker.estimate_llm_cost(1000, 0) == \
+        pytest.approx(config.PRICE_LLM_INPUT_PER_1K)
+    assert tracker.estimate_llm_cost(0, 1000) == \
+        pytest.approx(config.PRICE_LLM_OUTPUT_PER_1K)
+    assert tracker.estimate_llm_cost(1000, 1000) == pytest.approx(
+        config.PRICE_LLM_INPUT_PER_1K + config.PRICE_LLM_OUTPUT_PER_1K)
+    assert config.PRICE_LLM_OUTPUT_PER_1K > config.PRICE_LLM_INPUT_PER_1K
 
 
 def test_record_accumulates_and_persists(tracker):
+    expected = config.PRICE_LLM_INPUT_PER_1K + config.PRICE_LLM_OUTPUT_PER_1K
     tracker.record_llm(call_type="verify", in_tokens=1000, out_tokens=1000,
                        latency_ms=5.0, query_id="q1", iteration=1)
-    assert tracker.cumulative() == pytest.approx(0.006)
+    assert tracker.cumulative() == pytest.approx(expected)
     raw = json.loads(tracker.ledger_path.read_text())
-    assert raw["cumulative_usd"] == pytest.approx(0.006)
+    assert raw["cumulative_usd"] == pytest.approx(expected)
     assert raw["records"][0]["call_type"] == "verify"
 
 
@@ -73,35 +59,37 @@ def test_ledger_survives_process_restart(tmp_path):
 
 
 def test_check_affordable_raises_at_ceiling(tracker):
-    tracker.record_llm(call_type="generate", in_tokens=1_000_000,
-                       out_tokens=0, latency_ms=1.0)   # $1.00, at the ceiling
+    # Park spend exactly at the $1.00 ceiling the fixture sets.
+    tracker.record_llm(call_type="generate", in_tokens=_tokens_worth(1.00),
+                       out_tokens=0, latency_ms=1.0)
     with pytest.raises(BudgetExceeded, match="hard ceiling"):
         tracker.check_affordable(0.01)
 
 
-def test_budget_exception_fires_before_the_api_call(monkeypatch, tracker, tmp_path):
-    """The exception must be raised BEFORE the call, not after paying for it."""
-    fake = FakeClient()
-    monkeypatch.setattr(bedrock, "get_client", lambda: fake)
-    monkeypatch.setattr(bedrock, "TRACKER", tracker)
-    monkeypatch.setattr(bedrock, "DRY_RUN", False)
-    monkeypatch.setattr(bedrock, "CACHE",
-                        cache_mod.DiskCache(tmp_path / "cache"))
+def test_budget_exception_fires_before_the_api_call(wired, monkeypatch):
+    """The exception must be raised BEFORE the call, not after paying for it.
+
+    Runs under both providers: the pre-flight check is shared code, but a
+    provider path that built its request before consulting the guard would
+    still show up here as a non-zero call count.
+    """
+    fake, tracker, _ = wired
+    monkeypatch.setattr(tracker, "hard_budget_usd", 1.00)
 
     # Park spend right at the ceiling.
-    tracker.record_llm(call_type="generate", in_tokens=1_000_000,
+    tracker.record_llm(call_type="generate", in_tokens=_tokens_worth(1.00),
                        out_tokens=0, latency_ms=1.0)
 
     with pytest.raises(BudgetExceeded):
-        bedrock.invoke_llm("hello", call_type="verify", max_tokens=512)
+        llm.invoke_llm("hello", call_type="verify", max_tokens=512)
 
-    assert fake.calls == 0, "Bedrock was reached despite the budget being blown"
+    assert fake.calls == 0, \
+        "the provider was reached despite the budget being blown"
 
 
 def test_run_budget_bounds_a_single_invocation(tracker):
     with pytest.raises(BudgetExceeded, match="allowance"):
-        with tracker.run_budget(0.002, name="tiny"):
-            # $0.006 of estimated spend against a $0.002 allowance.
+        with tracker.run_budget(0.0000001, name="tiny"):
             tracker.check_affordable(tracker.estimate_llm_cost(1000, 1000))
 
 
@@ -112,22 +100,25 @@ def test_run_budget_releases_on_exit(tracker):
     tracker.check_affordable(0.5)
 
 
-def test_missing_usage_block_is_fatal(monkeypatch, tracker, tmp_path):
-    """Never silently estimate cost post-hoc; measured dC is a core claim."""
-    class NoUsageClient(FakeClient):
-        def invoke_model(self, **kwargs):
-            self.calls += 1
-            return {"body": _Body(json.dumps(
-                {"content": [{"type": "text", "text": "x"}]}))}
+def test_missing_token_counts_are_fatal_on_both_providers(wired, monkeypatch):
+    """[D-2]: never silently estimate cost post-hoc; measured dC is a claim."""
+    fake, tracker, disk = wired
 
-    monkeypatch.setattr(bedrock, "get_client", lambda: NoUsageClient())
-    monkeypatch.setattr(bedrock, "TRACKER", tracker)
-    monkeypatch.setattr(bedrock, "DRY_RUN", False)
-    monkeypatch.setattr(bedrock, "CACHE",
-                        cache_mod.DiskCache(tmp_path / "cache"))
+    if config.PROVIDER == "gemini":
+        fake.omit_usage = True
+    else:
+        class NoUsageClient(FakeBedrockClient):
+            def invoke_model(self, **kwargs):
+                self.calls += 1
+                return {"body": _Body(json.dumps(
+                    {"content": [{"type": "text", "text": "x"}]}))}
 
-    with pytest.raises(RuntimeError, match="usage"):
-        bedrock.invoke_llm("hello", call_type="verify")
+        import llm as llm_mod
+        replacement = NoUsageClient()
+        monkeypatch.setattr(llm_mod, "get_client", lambda: replacement)
+
+    with pytest.raises(RuntimeError, match="(?i)usage|token"):
+        llm.invoke_llm("hello", call_type="verify")
 
 
 def test_summary_groups_by_call_type(tracker):

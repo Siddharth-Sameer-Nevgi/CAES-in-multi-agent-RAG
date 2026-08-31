@@ -98,7 +98,7 @@ def build_chunks(passages: list[dict]) -> list[dict]:
 
 
 def embed_chunks(chunks: list[dict], batch: int = config.EMBED_BATCH) -> np.ndarray:
-    import bedrock
+    import llm
     try:
         from tqdm import tqdm
     except ImportError:                                   # pragma: no cover
@@ -109,7 +109,7 @@ def embed_chunks(chunks: list[dict], batch: int = config.EMBED_BATCH) -> np.ndar
     for start in tqdm(range(0, len(chunks), batch), desc="embedding",
                       unit="batch"):
         window = chunks[start:start + batch]
-        vecs[start:start + len(window)] = bedrock.embed(
+        vecs[start:start + len(window)] = llm.embed(
             [c["text"] for c in window], policy="ingest")
     return vecs
 
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
               f"Delete it or pass --force if you really mean to spend again.")
         return 0
 
-    import bedrock
+    import llm
     from costs import TRACKER
 
     rows = load_hotpotqa(args.sample, config.SPLIT_SEED)
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
              len(questions), len(passages), len(chunks))
 
     est = sum(len(c["text"]) / 3.6 for c in chunks) / 1000 * \
-        config.PRICE_TITAN_EMBED_PER_1K
+        config.PRICE_EMBED_PER_1K
     print(f"Estimated embedding cost: ${est:.2f} "
           f"(cumulative so far ${TRACKER.cumulative():.2f} of "
           f"${config.HARD_BUDGET_USD:.2f})")
@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         "chunk_overlap_tokens": config.CHUNK_OVERLAP_TOKENS,
         "sample_size": args.sample,
         "split_seed": config.SPLIT_SEED,
-        "dry_run": bedrock.DRY_RUN,
+        "dry_run": llm.DRY_RUN,
     }, indent=2), encoding="utf-8")
 
     if args.upload_s3:

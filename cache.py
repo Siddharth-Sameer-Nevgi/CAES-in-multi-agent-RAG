@@ -1,4 +1,4 @@
-"""Disk cache for Bedrock responses.
+"""Disk cache for model responses.
 
 This is the single most important cost control during development: re-running an
 experiment after a bug fix must be free for everything already computed.

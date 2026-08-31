@@ -2,7 +2,7 @@
 
     DRY_RUN=1 python -m smoke
 
-Catches wiring bugs for $0.00 before any Bedrock call is made. Builds a tiny
+Catches wiring bugs for $0.00 before any billable call is made. Builds a tiny
 synthetic index if the real one is absent, so it works on a clean checkout and
 never touches data/index.faiss.
 
@@ -53,11 +53,11 @@ QUESTIONS = [
 def build_synthetic_index() -> None:
     import faiss
 
-    import bedrock
+    import llm
 
     chunks = [{"chunk_id": str(i), "title": t, "part": 0, "text": f"{t}: {b}"}
               for i, (t, b) in enumerate(_SYNTHETIC)]
-    vecs = bedrock.embed([c["text"] for c in chunks], policy="smoke")
+    vecs = llm.embed([c["text"] for c in chunks], policy="smoke")
     vecs = vecs / np.maximum(np.linalg.norm(vecs, axis=1, keepdims=True), 1e-12)
     index = faiss.IndexFlatIP(vecs.shape[1])
     index.add(vecs.astype("float32"))
@@ -70,24 +70,32 @@ def build_synthetic_index() -> None:
 def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
-    import bedrock
+    import llm
     import retrieval
     from cache import CACHE
     from costs import TRACKER
     from policies import CAESPolicy, FixedPolicy, OneShotPolicy
 
-    if not bedrock.DRY_RUN:
+    if not llm.DRY_RUN:
         print("Refusing to run: smoke is a $0.00 check. Set DRY_RUN=1.",
               file=sys.stderr)
         return 2
 
     spend_before = TRACKER.cumulative()
 
+    real = None
     if config.INDEX_PATH.exists():
-        print(f"Using the real index at {config.INDEX_PATH}")
-        retrieval._RETRIEVER = retrieval.Retriever()
+        try:
+            real = retrieval.Retriever()
+            print(f"Using the real index at {config.INDEX_PATH}")
+        except (ValueError, FileNotFoundError) as exc:
+            # e.g. an index built by the previous provider's embedding model.
+            print(f"Ignoring the index at {config.INDEX_PATH}: {exc}")
+    if real is not None:
+        retrieval._RETRIEVER = real
     else:
-        print("No real index found; building a tiny synthetic one (free).")
+        print(f"Building a tiny synthetic index at {config.EMBED_DIM} dims "
+              f"(free).")
         build_synthetic_index()
         retrieval._RETRIEVER = retrieval.Retriever(SMOKE_INDEX, SMOKE_CHUNKS)
 
@@ -128,8 +136,8 @@ def main() -> int:
         print(f"iteration counts for {label}: {seen}")
 
     CACHE.log_stats("smoke cache")
-    t = bedrock.totals()
-    print(f"bedrock calls={t['calls']} cache_hits={t['cache_hits']} "
+    t = llm.totals()
+    print(f"llm calls={t['calls']} cache_hits={t['cache_hits']} "
           f"notional=${t['notional_usd']:.5f} actual=${t['actual_usd']:.5f}")
 
     spend_after = TRACKER.cumulative()

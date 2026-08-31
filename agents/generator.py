@@ -38,11 +38,11 @@ def generate(
     iteration: int = 0,
     policy: str = "",
 ) -> str:
-    import bedrock
+    import llm
 
     prompt = GENERATOR_PROMPT.format(
         question=question, evidence=format_evidence(evidence))
-    resp = bedrock.invoke_llm(
+    resp = llm.invoke_llm(
         prompt, call_type="generate", query_id=query_id, iteration=iteration,
         max_tokens=MAX_ANSWER_TOKENS, system=GENERATOR_SYSTEM, policy=policy,
     )

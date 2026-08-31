@@ -101,12 +101,12 @@ class CostTracker:
 
     def estimate_llm_cost(self, in_tokens: int, out_tokens_est: int) -> float:
         return (
-            in_tokens / 1000.0 * config.PRICE_HAIKU_INPUT_PER_1K
-            + out_tokens_est / 1000.0 * config.PRICE_HAIKU_OUTPUT_PER_1K
+            in_tokens / 1000.0 * config.PRICE_LLM_INPUT_PER_1K
+            + out_tokens_est / 1000.0 * config.PRICE_LLM_OUTPUT_PER_1K
         )
 
     def estimate_embed_cost(self, in_tokens: int) -> float:
-        return in_tokens / 1000.0 * config.PRICE_TITAN_EMBED_PER_1K
+        return in_tokens / 1000.0 * config.PRICE_EMBED_PER_1K
 
     # ---------- the gate ----------
 
@@ -121,7 +121,7 @@ class CostTracker:
                 raise BudgetExceeded(
                     f"Call would take cumulative spend to ${projected:.4f}, over "
                     f"the hard ceiling of ${self.hard_budget_usd:.2f}. "
-                    f"Refusing to call Bedrock."
+                    f"Refusing to make the call."
                 )
             for rb in self._run_budgets:
                 run_projected = rb.spent(projected)
@@ -153,8 +153,8 @@ class CostTracker:
         policy: str = "", model: str = config.MODEL_LLM,
     ) -> float:
         usd = (
-            in_tokens / 1000.0 * config.PRICE_HAIKU_INPUT_PER_1K
-            + out_tokens / 1000.0 * config.PRICE_HAIKU_OUTPUT_PER_1K
+            in_tokens / 1000.0 * config.PRICE_LLM_INPUT_PER_1K
+            + out_tokens / 1000.0 * config.PRICE_LLM_OUTPUT_PER_1K
         )
         return self._record(CostRecord(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -224,7 +224,7 @@ class CostTracker:
         """Bound the spend of one experiment invocation.
 
         Enforced on the same pre-flight path as the hard ceiling, so a call that
-        would breach the allowance never reaches Bedrock.
+        would breach the allowance never reaches the provider.
         """
         with self._lock:
             rb = _RunBudget(name=name, max_usd=max_usd,

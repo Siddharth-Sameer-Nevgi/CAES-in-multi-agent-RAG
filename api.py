@@ -22,7 +22,7 @@ log = logging.getLogger("caes.api")
 app = FastAPI(title="CAES-RAG", version="1.0",
               description="Cost-Aware Evidence Sufficiency retrieval gate")
 
-# Per-iteration cost is metered by diffing process-wide counters in bedrock.py,
+# Per-iteration cost is metered by diffing process-wide counters in llm.py,
 # so concurrent graph runs would interleave and mis-attribute cost to each
 # other. One lock keeps queries serialised. Fine for a demonstration endpoint;
 # a real deployment would scope the meter per request instead.

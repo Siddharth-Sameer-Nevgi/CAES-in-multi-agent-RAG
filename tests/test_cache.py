@@ -1,28 +1,13 @@
-"""Phase 0 acceptance: cache hits are identical and free."""
-from __future__ import annotations
+"""Phase 0 acceptance: cache hits are identical and free.
 
-import json
+Every transport-level test here runs once per provider via the `wired` fixture.
+"""
+from __future__ import annotations
 
 import pytest
 
-import bedrock
 import cache as cache_mod
-from costs import CostTracker
-from tests.test_costs import FakeClient
-
-
-@pytest.fixture()
-def wired(monkeypatch, tmp_path):
-    """A bedrock module wired to a fake client, fresh cache, fresh ledger."""
-    fake = FakeClient()
-    tracker = CostTracker(ledger_path=tmp_path / "ledger.json",
-                          hard_budget_usd=10.0)
-    disk = cache_mod.DiskCache(tmp_path / "cache")
-    monkeypatch.setattr(bedrock, "get_client", lambda: fake)
-    monkeypatch.setattr(bedrock, "TRACKER", tracker)
-    monkeypatch.setattr(bedrock, "CACHE", disk)
-    monkeypatch.setattr(bedrock, "DRY_RUN", False)
-    return fake, tracker, disk
+import llm
 
 
 def test_key_is_stable_under_dict_ordering():
@@ -39,15 +24,15 @@ def test_key_changes_with_model():
 def test_hit_returns_identical_content_and_costs_nothing(wired):
     fake, tracker, disk = wired
 
-    first = bedrock.invoke_llm("what colour is the sky?", call_type="generate",
-                               query_id="q1")
+    first = llm.invoke_llm("what colour is the sky?", call_type="generate",
+                           query_id="q1")
     cost_after_first = tracker.cumulative()
     assert first.cached is False
     assert fake.calls == 1
     assert cost_after_first > 0
 
-    second = bedrock.invoke_llm("what colour is the sky?", call_type="generate",
-                                query_id="q1")
+    second = llm.invoke_llm("what colour is the sky?", call_type="generate",
+                            query_id="q1")
     assert second.cached is True
     assert second.text == first.text
     assert second.input_tokens == first.input_tokens
@@ -61,17 +46,41 @@ def test_hit_returns_identical_content_and_costs_nothing(wired):
     assert disk.stats()["misses"] == 1
 
 
+def test_cache_hit_still_accrues_notional_cost(wired):
+    """[D-12]: break this and the gate changes its mind on a warm cache."""
+    _, _, _ = wired
+    before = llm.totals()["notional_usd"]
+    first = llm.invoke_llm("notional probe", call_type="verify")
+    after_first = llm.totals()["notional_usd"]
+    second = llm.invoke_llm("notional probe", call_type="verify")
+    after_second = llm.totals()["notional_usd"]
+
+    assert second.cached is True
+    assert second.usd == 0.0, "a replayed call must not touch the ledger"
+    assert second.notional_usd == pytest.approx(first.notional_usd)
+    assert after_second - after_first == pytest.approx(after_first - before), \
+        "a cache hit accrued a different notional cost than the paid call"
+
+
 def test_different_prompt_misses(wired):
     fake, _, _ = wired
-    bedrock.invoke_llm("a", call_type="generate")
-    bedrock.invoke_llm("b", call_type="generate")
+    llm.invoke_llm("a", call_type="generate")
+    llm.invoke_llm("b", call_type="generate")
     assert fake.calls == 2
 
 
 def test_system_prompt_participates_in_the_key(wired):
     fake, _, _ = wired
-    bedrock.invoke_llm("a", call_type="generate", system="be terse")
-    bedrock.invoke_llm("a", call_type="generate", system="be verbose")
+    llm.invoke_llm("a", call_type="generate", system="be terse")
+    llm.invoke_llm("a", call_type="generate", system="be verbose")
+    assert fake.calls == 2
+
+
+def test_temperature_participates_in_the_key(wired):
+    """[D-19]: the key is the request body, so sampling changes must miss."""
+    fake, _, _ = wired
+    llm.invoke_llm("a", call_type="generate", temperature=0.0)
+    llm.invoke_llm("a", call_type="generate", temperature=1.0)
     assert fake.calls == 2
 
 

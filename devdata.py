@@ -77,8 +77,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args(argv)
 
-    import bedrock
-    if not bedrock.DRY_RUN:
+    import llm
+    if not llm.DRY_RUN:
         print("Refusing to run outside DRY_RUN: this would spend real money on "
               "fake data. Set DRY_RUN=1.", file=sys.stderr)
         return 2
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
 
     questions, passages = build(args.n, config.SPLIT_SEED)
     chunks = build_chunks(passages)
-    vecs = bedrock.embed([c["text"] for c in chunks], policy="devdata")
+    vecs = llm.embed([c["text"] for c in chunks], policy="devdata")
     vecs = vecs / np.maximum(np.linalg.norm(vecs, axis=1, keepdims=True), 1e-12)
     index = faiss.IndexFlatIP(vecs.shape[1])
     index.add(vecs.astype("float32"))

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-import bedrock
+import llm as llm_mod
 from agents import verifier
 from agents.verifier import Verification, truncate_evidence, verify
 from metrics import exact_match, f1, is_abstention, score
@@ -23,24 +23,25 @@ class FakeLLM:
     def __call__(self, prompt, **kwargs):
         self.calls += 1
         text = self.texts[min(self.calls - 1, len(self.texts) - 1)]
-        return bedrock.LLMResponse(text=text, input_tokens=10, output_tokens=5,
+        return llm_mod.LLMResponse(text=text, input_tokens=10, output_tokens=5,
                                    latency_ms=1.0, cached=False, usd=0.0,
                                    notional_usd=0.0)
 
 
 @pytest.fixture()
-def llm(monkeypatch):
+def scripted_llm(monkeypatch):
+    """Install a scripted sequence of verifier responses on the llm module."""
     def install(*texts):
         fake = FakeLLM(*texts)
-        monkeypatch.setattr(bedrock, "invoke_llm", fake)
+        monkeypatch.setattr(llm_mod, "invoke_llm", fake)
         return fake
     return install
 
 
 # --- parsing --------------------------------------------------------------
 
-def test_clean_json_parses(llm):
-    llm('{"coverage": 0.42, "missing": "the director", "confident": false}')
+def test_clean_json_parses(scripted_llm):
+    scripted_llm('{"coverage": 0.42, "missing": "the director", "confident": false}')
     v = verify("q", [], query_id="q1")
     assert v.coverage == pytest.approx(0.42)
     assert v.missing == "the director"
@@ -48,23 +49,23 @@ def test_clean_json_parses(llm):
     assert v.parse_failed is False
 
 
-def test_markdown_fences_are_stripped(llm):
-    llm('```json\n{"coverage": 0.8, "missing": "nothing", "confident": true}\n```')
+def test_markdown_fences_are_stripped(scripted_llm):
+    scripted_llm('```json\n{"coverage": 0.8, "missing": "nothing", "confident": true}\n```')
     v = verify("q", [], query_id="q1")
     assert v.coverage == pytest.approx(0.8)
     assert v.parse_failed is False
 
 
-def test_json_embedded_in_prose_is_recovered(llm):
-    llm('Here is my assessment:\n'
+def test_json_embedded_in_prose_is_recovered(scripted_llm):
+    scripted_llm('Here is my assessment:\n'
         '{"coverage": 0.6, "missing": "the year", "confident": false}\n'
         'Hope that helps!')
     v = verify("q", [], query_id="q1")
     assert v.coverage == pytest.approx(0.6)
 
 
-def test_repair_retry_happens_once_and_can_succeed(llm):
-    fake = llm("total nonsense, no json here",
+def test_repair_retry_happens_once_and_can_succeed(scripted_llm):
+    fake = scripted_llm("total nonsense, no json here",
                '{"coverage": 0.55, "missing": "x", "confident": false}')
     v = verify("q", [], query_id="q1")
     assert fake.calls == 2, "expected exactly one repair attempt"
@@ -72,24 +73,24 @@ def test_repair_retry_happens_once_and_can_succeed(llm):
     assert v.parse_failed is False
 
 
-def test_double_failure_holds_previous_coverage(llm):
+def test_double_failure_holds_previous_coverage(scripted_llm):
     """A parse failure must not read as progress."""
-    fake = llm("nonsense", "still nonsense")
+    fake = scripted_llm("nonsense", "still nonsense")
     v = verify("q", [], query_id="q1", previous_coverage=0.63)
     assert fake.calls == 2
     assert v.coverage == pytest.approx(0.63)
     assert v.parse_failed is True
 
 
-def test_coverage_is_clamped_to_the_unit_interval(llm):
-    llm('{"coverage": 1.7, "missing": "", "confident": true}')
+def test_coverage_is_clamped_to_the_unit_interval(scripted_llm):
+    scripted_llm('{"coverage": 1.7, "missing": "", "confident": true}')
     assert verify("q", [], query_id="q1").coverage == 1.0
-    llm('{"coverage": -0.4, "missing": "", "confident": false}')
+    scripted_llm('{"coverage": -0.4, "missing": "", "confident": false}')
     assert verify("q", [], query_id="q1").coverage == 0.0
 
 
-def test_non_numeric_coverage_triggers_repair(llm):
-    fake = llm('{"coverage": "high", "missing": "x", "confident": true}',
+def test_non_numeric_coverage_triggers_repair(scripted_llm):
+    fake = scripted_llm('{"coverage": "high", "missing": "x", "confident": true}',
                '{"coverage": 0.9, "missing": "nothing", "confident": true}')
     v = verify("q", [], query_id="q1")
     assert fake.calls == 2

@@ -104,7 +104,7 @@ In this order. You can stop after step 4 and understand 80% of the system.
 | 1 | `config.py` | Every tunable. Nothing is hardcoded elsewhere. | all of it, it's short |
 | 2 | `caes.py` | **The contribution.** ΔQ, ΔC, smoothing, the decision. | `estimate_delta_q`, `smooth_coverage`, `CAESPolicy.decide` |
 | 3 | `graph.py` | How a query actually flows; where the hard cap lives. | `make_verify_node`, `evaluate_gate` |
-| 4 | `bedrock.py` | The only place that talks to AWS. Cache + budget + metering. | `invoke_llm`, the notional-accounting block |
+| 4 | `llm.py` | The only place that talks to a model provider. Cache + budget + metering. | `invoke_llm`, the notional-accounting block |
 | 5 | `costs.py` | Ledger, pre-flight gate, `run_budget`. | `check_affordable`, `_flush` |
 | 6 | `agents/prompts.py` | The verifier rubric **is** the ΔQ signal. | `VERIFIER_PROMPT` |
 | 7 | `agents/verifier.py` | The parse ladder that protects that signal. | `verify`, `_extract_json` |
@@ -131,18 +131,21 @@ These are not style preferences. Each one, if violated, produces a system that
 still runs and still emits numbers, but the numbers no longer mean what the
 paper says they mean.
 
-1. **All Bedrock traffic goes through `bedrock.py`.** A direct `boto3` call
-   anywhere else is invisible to the ledger, the cache, and the budget guard,
-   and silently corrupts ΔC.
+1. **All model traffic goes through `llm.py`.** A direct `boto3` call or
+   HTTP request to a provider anywhere else is invisible to the ledger, the
+   cache, and the budget guard, and silently corrupts ΔC. This holds for both
+   providers; `config.PROVIDER` selects request shaping *inside* `llm.py` and
+   nowhere else. See **[D-22]**.
 2. **Budget checks happen before the network call, never after.** Enforced by
    `test_budget_exception_fires_before_the_api_call`, which asserts the mocked
    client's call count stays at zero.
 3. **Cache hits never record cost to the ledger, and always accrue notional
    cost.** Break the first and re-runs cost money on paper; break the second and
    the gate changes its mind on a warm cache.
-4. **Token counts come from the response `usage` field.** Never estimate
-   post-hoc. `_estimate_tokens()` exists solely for the pre-flight affordability
-   check.
+4. **Token counts come from the response.** Never estimate post-hoc.
+   `_estimate_tokens()` exists solely for the pre-flight affordability check.
+   Bedrock reports them in `usage`, Gemini in `usageMetadata`; Gemini's
+   embedding endpoint reports none, which is why **[D-23]** exists.
 5. **`MAX_ITERATIONS` is enforced in the graph, before the policy is
    consulted.** A gate bug must be incapable of looping.
 6. **The tune and test splits never mix.** `splits.py` asserts disjointness;
@@ -157,14 +160,23 @@ paper says they mean.
 ### How to check you haven't broken anything
 
 ```bash
-pytest -q                        # 62 tests, no network, no credentials
+pytest -q                        # 113 tests, no network, no credentials
 DRY_RUN=1 python -m smoke        # must end with "OK: full graph exercised for $0.00"
+
+# and the same two under the other provider
+CAES_PROVIDER=bedrock pytest -q
+CAES_PROVIDER=bedrock DRY_RUN=1 python -m smoke
 ```
+
+Transport-level tests run once per provider against a fake that speaks that
+provider's real wire format, and the provider *not* under test is booby-trapped,
+so a shaping bug that routed a call to the wrong transport fails loudly.
 
 The two highest-value tests to keep passing:
 
 - `tests/test_graph.py::test_max_iterations_is_enforced_against_a_broken_gate`
 - `tests/test_costs.py::test_budget_exception_fires_before_the_api_call`
+- `tests/test_provider.py::test_llm_is_the_only_module_that_calls_a_provider`
 
 ---
 
@@ -197,17 +209,20 @@ under-spending is not a failure mode here.
 
 ### [D-2] A response without a `usage` block is fatal
 
-**Context.** Bedrock normally returns real input/output token counts. If it
-didn't, the obvious move would be to fall back to the estimator.
+**Context.** Both providers return real input/output token counts — Bedrock in
+`usage`, Gemini in `usageMetadata`. If one didn't, the obvious move would be to
+fall back to the estimator.
 
 **Decision.** Raise `RuntimeError` instead.
 
 **Why.** Measured ΔC is a central claim. A silent fallback to estimated tokens
 would put fabricated numbers into the results with no visible signal.
 
-**Consequences.** A Bedrock response-shape change breaks the run loudly. That is
-the intended behaviour. Covered by
-`test_missing_usage_block_is_fatal`.
+**Consequences.** A response-shape change on either provider breaks the run
+loudly. That is the intended behaviour. Covered by
+`test_missing_token_counts_are_fatal_on_both_providers`, which runs against both.
+Gemini's *embedding* endpoint returns no count at all, which is a separate
+problem — see **[D-23]**.
 
 ---
 
@@ -389,7 +404,7 @@ Two tests pin both halves of this behaviour.
 **Context.** The spec says ΔC is *measured* cost. The cache makes re-runs free.
 Those two facts collide.
 
-**Decision.** `bedrock.py` maintains process-wide counters accruing **notional**
+**Decision.** `llm.py` maintains process-wide counters accruing **notional**
 cost — list price computed from the real measured token counts, which the cache
 persists — separately from the ledger's **actual** spend. The gate, `cost_history`
 and `total_usd` read notional; budget guards read actual.
@@ -407,7 +422,9 @@ money never spent).
 **Consequences.** Two cost numbers exist and they mean different things. Papers
 quote notional; the credit balance follows actual. Cached embeddings persist
 `in_tokens` specifically so their notional cost survives a cache hit — do not
-drop that field.
+drop that field. Since the move to the Gemini free tier, actual is *always*
+zero, which makes this separation load-bearing rather than merely useful — see
+**[D-22]**.
 
 ---
 
@@ -423,7 +440,10 @@ points, and the ledger's completeness depends on there being exactly one.
 
 **Consequences.** Request/response bodies are hand-built
 (`anthropic_version: "bedrock-2023-05-31"`). If Claude access moves to a client
-the embeddings model also supports, revisit.
+the embeddings model also supports, revisit. The same reasoning applied again at
+**[D-22]**: the Gemini path is raw REST rather than `google-generativeai`, so
+there is still exactly one entry point and the cache key is still the request
+body we built.
 
 ---
 
@@ -518,11 +538,16 @@ for every policy — treat it as a research parameter, not a tuning knob.
 
 **Why.** Reproducibility, and cache effectiveness — the cache key is the request
 body, so deterministic sampling maximises hit rate across re-runs. Haiku 4.5
-accepts sampling parameters (newer Claude models reject them).
+accepts sampling parameters (newer Claude models reject them). Gemini takes it
+as `generationConfig.temperature`.
 
 **Consequences.** If the model is ever changed to one that rejects
-`temperature`, this must be removed. Model choice is fixed by the cost
-constraints, so that is not imminent.
+`temperature`, this must be removed — and that is a methodology change, not a
+config tweak, because cache correctness depends on determinism. On
+`gemini-2.5-flash` there is a second determinism risk that `temperature` does
+not cover: thinking is on by default and its length varies, so **[D-22]**
+disables it explicitly. Pinned for both providers by
+`test_temperature_zero_is_sent_on_both_providers`.
 
 ---
 
@@ -604,18 +629,156 @@ checks.
 
 ---
 
+### [D-22] The evaluation provider is Google Gemini, and actual spend is now structurally zero
+
+**Context.** Bedrock model invocation is blocked account-wide on this AWS
+account. `ListFoundationModels` succeeds and returns 120 models, but
+`InvokeModel` fails with `ValidationException: Operation not allowed` for
+`amazon.titan-embed-text-v2:0`, `amazon.nova-lite-v1:0`, **and** through the
+AWS console playground — so it is not model-specific, not SDK-related, and not
+fixable from our side. A support case is open and unresolved.
+
+**Decision.** `bedrock.py` becomes `llm.py`, gaining a `config.PROVIDER` switch
+(`"bedrock" | "gemini"`, defaulting to `"gemini"`). Only request/response
+shaping and price constants vary by provider; the cache, the pre-flight budget
+gate, notional accounting, the dry-run path and the single-entry-point
+invariant are shared verbatim. The Bedrock path is kept fully working.
+
+**Why the contribution is unaffected.** The contribution is the stopping rule.
+ΔQ − λ·ΔC needs measured token counts and published per-token prices; every
+commercial provider supplies both. The provider is a threat-to-validity line
+([METHODOLOGY.md](METHODOLOGY.md) §10, External), not part of the claim.
+
+**Why the Bedrock path stays.** The support case may resolve, and a two-provider
+robustness result would strengthen the paper. A dead code path would be a cost;
+a *tested* one is an asset — `tests/conftest.py` runs every transport-level test
+once per provider against a fake speaking that provider's wire format, and
+booby-traps the other transport so a mis-routed call fails loudly.
+
+**The consequence that actually matters: actual spend is now $0.00, always.**
+Both `gemini-2.5-flash` and `gemini-embedding-001` bill nothing on the free
+tier. So:
+
+* **ΔC is entirely list-price notional.** [D-12]'s machinery already handles
+  this correctly — but the reason it matters has changed. Under Bedrock,
+  notional cost existed to keep a *cached* re-run making the same decisions as
+  the paid run. Under Gemini it is the only cost signal that exists at all: if
+  the gate read actual spend it would read zero on every call, on every run,
+  paid or cached, and CAES would degenerate to `MAX_ITERATIONS` on every query.
+* **The ledger and `HARD_BUDGET_USD` become vestigial safety rather than active
+  constraints.** They are kept. The Bedrock path may return, and a guard that
+  only exists when it is needed is a guard that is wrong when it is needed.
+* **The paper must report costs as list-price-derived, not billed.** No spend
+  was incurred. Saying "cost" without that qualifier would misdescribe what was
+  measured. §10 (Construct) states this explicitly.
+
+**The binding constraint moved.** It is no longer a credit balance; it is
+free-tier rate limiting. `llm.py` gains a client-side RPM pacer
+(`GEMINI_MAX_RPM`) and retries 429 `RESOURCE_EXHAUSTED` honouring the
+server-supplied `retryDelay`. See §11.
+
+**Models substituted.** The migration plan named `gemini-2.0-flash` and
+`text-embedding-004`. Both were retired before this landed: 2.0 Flash is listed
+under "Previous models / Shut down", and `text-embedding-004` is gone from the
+model list entirely. The nearest live equivalents in the same tier are
+`gemini-2.5-flash` and `gemini-embedding-001`, confirmed 2026-08-31.
+
+**Two Gemini specifics that are cost-correctness issues, not config:**
+
+* **Thinking is ON by default on `gemini-2.5-flash`, and thinking tokens bill as
+  output.** Left on they would inflate ΔC and, being variable in length, would
+  undermine the determinism [D-19] relies on for cache correctness. Disabled via
+  `thinkingConfig.thinkingBudget = 0`. `thoughtsTokenCount` is nonetheless
+  folded into the output count, so an ignored budget surfaces as measured cost
+  rather than as a silently understated ΔC.
+* **`EMBED_DIM` changes from 1024 to 768.** `gemini-embedding-001` returns 3072
+  by default and supports Matryoshka truncation. 768 keeps a flat index over
+  ~20k chunks near 60 MB rather than 250 MB, which matters on the intended
+  t3.micro host. Truncated vectors are **not** unit-norm as returned, so
+  `llm.embed` re-normalises — without that, `IndexFlatIP` stops meaning cosine.
+  `Retriever` now refuses to load an index whose dimension disagrees with
+  `config.EMBED_DIM`, and warns when `meta.json` names a different embedding
+  model: a stale index is otherwise a *silent* retrieval failure, not an error.
+
+**Rejected.** Waiting on the support case (unbounded, and the project cannot
+wait). Abandoning AWS (S3, EC2 and CloudWatch are unaffected and stay in the
+deployment — see the README; Bedrock was only the model-serving layer). Deleting
+the Bedrock path (throws away the robustness result and the two-provider tests).
+Using the `google-generativeai` SDK (a second entry point to keep honest, and
+the cache key is the request body, which raw REST keeps under our control —
+same reasoning as [D-13]).
+
+**Consequences.** Two providers to keep passing, which the test matrix pays for.
+Every price in `config.py` now carries a provider prefix, and the neutral names
+`PRICE_LLM_*` / `MODEL_*` / `EMBED_DIM` are resolved once by
+`config.provider_settings()`. λ tuned on one provider does not transfer to the
+other: ΔC differs by roughly 3× on input and 2× on output, and the sensitive
+band moves with it.
+
+---
+
+### [D-23] Gemini's embedding endpoint returns no token count, so the count is measured separately
+
+**Context.** Invariant 4 says token counts are read from the response, never
+estimated. Gemini's `:embedContent` returns `{"embedding": {"values": [...]}}`
+and nothing else — no token count of any kind. Bedrock's Titan response carries
+`inputTextTokenCount`; Gemini has no equivalent field.
+
+Three options, none free of cost:
+
+1. **Raise, as [D-2] does for LLM calls.** Consistent, and makes the system
+   unbuildable — every embedding call fails. Rejected: an invariant that
+   forbids the only available implementation is not an invariant, it is a stop.
+2. **Estimate from character count.** One line, and it puts a fabricated number
+   into ΔC with no visible signal. This is precisely the failure [D-2] exists to
+   prevent.
+3. **Measure with a separate `:countTokens` call.** Preserves "measured, never
+   estimated" at the price of one extra request per *uncached* text.
+
+**Decision.** Option 3, controlled by `config.EMBED_TOKENS_MODE`
+(`"measured"`, the default). `"estimated"` is available, logs a warning naming
+the invariant it breaks on every affected call, and must be opted into
+knowingly.
+
+**Why measured is worth the request.** `countTokens` is free and its result is
+written into the same cache entry as the embedding, so it is paid once per
+unique text and never again — a re-run or a resumed ingest costs nothing extra.
+The query embedding is on the gate's ΔC path (`retrieval.py` embeds a query
+every iteration), so this is not merely an ingest-time concern.
+
+**The cost is rate limit, not money.** Free-tier limits are per-account and no
+longer published per model, and embedding the corpus doubles the request count
+against them. That is the real risk in this decision, and it is why
+`EMBED_TOKENS_MODE` exists as a switch rather than as a constant: if ingest
+proves infeasible against the account's actual RPD, flipping to `"estimated"`
+is a *research* trade-off — a stated deviation from invariant 4 affecting a
+term worth well under 1% of ΔC — and should be recorded as such, not made
+silently. Measure the real limits before deciding.
+
+**Consequences.** Cold ingest issues two requests per chunk. Warm ingest issues
+none. A `countTokens` response without `totalTokens` is fatal, on the same
+reasoning as [D-2]. Guarded by
+`tests/test_provider.py::test_gemini_embed_token_count_is_measured_not_estimated`
+and `::test_gemini_countTokens_without_a_total_is_fatal`.
+
+---
+
 ## 6. Traps
 
 Things that will cost you time, in rough order of likelihood.
 
 | Trap | Symptom | Fix |
 |---|---|---|
-| Bedrock model access not requested | `AccessDeniedException` on the first real call | Enable Claude Haiku 4.5 **and** Titan Embeddings V2 in the Bedrock console, `us-east-1` |
+| `GEMINI_API_KEY` not exported | `RuntimeError` naming the variable, before any network call | `export GEMINI_API_KEY=...` (never commit it) |
+| Index built by the other provider | `ValueError` naming both dimensions on `Retriever` construction | `rm -rf data/` and re-run `python ingest.py` — see **[D-22]** |
+| Free-tier rate limit | HTTP 429 `RESOURCE_EXHAUSTED`, retried with the server's `retryDelay` | Lower `GEMINI_MAX_RPM`; if it persists, the account's RPD is the wall |
+| Bedrock model access blocked | `ValidationException: Operation not allowed` | Account-wide block; use `CAES_PROVIDER=gemini` — see **[D-22]** |
 | Synthetic data still in `data/` | `ingest.py` exits 2 mentioning devdata | `rm -rf data/` |
 | `CAESPolicy` raises `ValueError` | λ never tuned | Run `tune_lambda.py`, write the value into `config.py` |
 | `experiments/run.py` exits 2 immediately | output file exists and `--resume` not passed | Add `--resume`, or delete `results/{policy}_raw.jsonl` |
 | Nothing happens, exits 0 | pre-flight confirmation | Add `--yes` |
-| Everything says `$0.00` | `DRY_RUN=1` is still exported | `unset DRY_RUN` |
+| *Notional* cost is `$0.00` | `DRY_RUN=1` is still exported | `unset DRY_RUN` |
+| *Actual* cost is `$0.00` | not a trap on Gemini — the free tier bills nothing, always. The gate reads notional; see **[D-22]** | nothing to fix |
 | Every CAES query stops at the same iteration | λ is far outside the sensitive region | Check `caes_decisions.jsonl`: if `lambda_times_delta_c` dwarfs `delta_q` everywhere, λ is too high |
 | λ sweep says "DEGENERATE" | F1 flat — usually still in `DRY_RUN` | Run with real responses |
 | λ sweep warns "degenerate on spread" | recommended λ puts >90% of queries in one iteration bucket | Compare against the best-spread λ it names; see **[D-21]** |
@@ -624,10 +787,15 @@ Things that will cost you time, in rough order of likelihood.
 
 ### The one that is hardest to notice
 
-If you add a Bedrock call that bypasses `bedrock.py`, everything keeps working.
-Tests pass. Figures render. The only symptom is that ΔC is understated, so the
-gate retrieves more than it should, and the paper's cost numbers are quietly
-wrong. There is no test that can catch this — it is why invariant 1 exists.
+If you add a model call that bypasses `llm.py`, everything keeps working. Tests
+pass. Figures render. The only symptom is that ΔC is understated, so the gate
+retrieves more than it should, and the paper's cost numbers are quietly wrong.
+
+No *runtime* test can catch this, which is why invariant 1 exists. There is now
+a static one — `test_llm_is_the_only_module_that_calls_a_provider` greps every
+module outside `llm.py` and `config.py` for a provider endpoint — but it
+recognises the two endpoints we know about, so it narrows the hole rather than
+closing it.
 
 ---
 

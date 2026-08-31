@@ -94,11 +94,11 @@ def verify(
     previous_coverage: float = 0.0,
 ) -> Verification:
     """Score how well `evidence` covers `question`."""
-    import bedrock
+    import llm
 
     prompt = VERIFIER_PROMPT.format(
         question=question, evidence=truncate_evidence(evidence))
-    resp = bedrock.invoke_llm(
+    resp = llm.invoke_llm(
         prompt, call_type="verify", query_id=query_id, iteration=iteration,
         max_tokens=MAX_VERIFY_TOKENS, system=VERIFIER_SYSTEM, policy=policy,
     )
@@ -112,7 +112,7 @@ def verify(
     # One repair attempt.
     log.warning("[%s it%d] verifier JSON unparseable; retrying with repair "
                 "instruction", query_id, iteration)
-    repair = bedrock.invoke_llm(
+    repair = llm.invoke_llm(
         VERIFIER_REPAIR_PROMPT.format(bad_output=resp.text[:500]),
         call_type="verify", query_id=query_id, iteration=iteration,
         max_tokens=MAX_VERIFY_TOKENS, system=VERIFIER_SYSTEM, policy=policy,

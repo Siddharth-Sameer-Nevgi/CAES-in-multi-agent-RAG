@@ -53,8 +53,8 @@ class State(TypedDict, total=False):
 
 
 def initial_state(question: str, query_id: str = "", policy: str = "") -> State:
-    import bedrock
-    t = bedrock.totals()
+    import llm
+    t = llm.totals()
     return State(
         question=question,
         query_id=query_id or f"q-{uuid.uuid4().hex[:8]}",
@@ -84,11 +84,11 @@ def initial_state(question: str, query_id: str = "", policy: str = "") -> State:
 # ---------------------------------------------------------------------------
 
 def node_plan(state: State) -> dict[str, Any]:
-    import bedrock
+    import llm
     from agents.planner import plan
 
     iteration = state["iteration"] + 1
-    t = bedrock.totals()
+    t = llm.totals()
     query = plan(
         state["question"],
         prior_evidence=state["evidence"],
@@ -133,7 +133,7 @@ def make_verify_node(policy, honor_confidence: bool = False) -> Callable:
     """
 
     def node_verify(state: State) -> dict[str, Any]:
-        import bedrock
+        import llm
         from agents.verifier import verify
 
         prev = state["coverage_history"][-1] if state["coverage_history"] else 0.0
@@ -142,7 +142,7 @@ def make_verify_node(policy, honor_confidence: bool = False) -> Callable:
             iteration=state["iteration"], policy=state.get("policy", ""),
             previous_coverage=prev,
         )
-        t = bedrock.totals()
+        t = llm.totals()
         iter_usd = t["notional_usd"] - state["_iter_usd_mark"]
         iter_latency = t["latency_ms"] - state["_iter_latency_mark"]
 
@@ -170,14 +170,14 @@ def make_verify_node(policy, honor_confidence: bool = False) -> Callable:
 
 
 def node_generate(state: State) -> dict[str, Any]:
-    import bedrock
+    import llm
     from agents.generator import generate
 
     answer = generate(
         state["question"], state["evidence"], query_id=state["query_id"],
         iteration=state["iteration"], policy=state.get("policy", ""),
     )
-    t = bedrock.totals()
+    t = llm.totals()
     return {
         "answer": answer,
         "total_usd": t["notional_usd"] - state["_query_usd_mark"],

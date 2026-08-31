@@ -1,7 +1,8 @@
 # CAES-RAG — Cost-Aware Evidence Sufficiency
 
-A multi-agent Retrieval-Augmented Generation system on AWS Bedrock whose novel
-component is a **Cost-Aware Evidence Sufficiency (CAES) gate**: at every
+A multi-agent Retrieval-Augmented Generation system, AWS-hosted and provider-
+pluggable, whose novel component is a **Cost-Aware Evidence Sufficiency (CAES)
+gate**: at every
 retrieval iteration it decides whether to retrieve again or stop, by comparing
 estimated marginal evidence-quality gain against measured marginal execution
 cost.
@@ -11,18 +12,37 @@ cost.
 The deliverable is a working system plus a three-way experimental comparison
 (CAES vs. fixed-iteration vs. one-shot routing) on HotpotQA.
 
-> **New to this codebase?** Read [DECISIONS.md](DECISIONS.md) first. It explains
+> **New to this codebase?** Read [DECISIONS.md](docs/DECISIONS.md) first. It explains
 > the mental model, the reading order, the invariants that must not be broken,
 > and why several deliberately unusual choices are load-bearing. This file
 > covers *how to run* the system; that one covers *how it thinks*.
-> [CHANGELOG.md](CHANGELOG.md) tracks progress phase by phase.
+> [CHANGELOG.md](docs/CHANGELOG.md) tracks progress phase by phase.
+>
+> Two companion documents go deeper:
+> [METHODOLOGY.md](docs/METHODOLOGY.md) — the research design: hypothesis, the ΔQ/ΔC
+> estimators, experimental controls, splits, λ tuning protocol, statistics, and
+> threats to validity.
+> [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) — the code tour: module map, query
+> lifecycle, cost accounting, and how to extend the system safely.
 
 ---
 
 ## ⚠️ Cost constraints are architectural
 
-This project is built to run inside **$100 of AWS credits** with a hard stop at
-**$40**. The guards are not preferences; removing them breaks the design.
+This project was built to run inside **$100 of AWS credits** with a hard stop
+at **$40**. The guards are not preferences; removing them breaks the design.
+
+> **Since [0.2.0] the model provider is Google Gemini, not Bedrock.** Bedrock
+> model invocation is blocked account-wide on this AWS account
+> (`ValidationException: Operation not allowed`, for every model and through the
+> console too); a support case is open. Both `gemini-2.5-flash` and
+> `gemini-embedding-001` are **free of charge on the free tier**, so **actual
+> spend is $0.00** and the dollar ceiling never binds. **Rate limiting** binds
+> instead. The ledger and the ceiling are kept anyway — the Bedrock path is
+> retained and still tested, and a guard that only exists when needed is a guard
+> that is wrong when it is needed. Every cost figure this project reports is
+> **list-price notional**, computed from measured token counts, **not billed**.
+> See [DECISIONS.md](docs/DECISIONS.md) **[D-22]**.
 
 ### Services that must NEVER be used
 
@@ -36,13 +56,31 @@ This project is built to run inside **$100 of AWS credits** with a hard stop at
 | Elastic IP (unattached) | Billed when not associated |
 | Provisioned Throughput | Hourly commitment, $40–200/hr |
 
-**Permitted:** Bedrock on-demand invoke (Claude Haiku 4.5 + Titan Text
-Embeddings V2 only), S3 standard storage, a single EC2 t3.micro (or fully
-local), CloudWatch logs within free tier.
+**Permitted:** Gemini free-tier calls; Bedrock on-demand invoke (Claude Haiku
+4.5 + Titan Text Embeddings V2 only) if the block ever clears; S3 standard
+storage; a single EC2 t3.micro (or fully local); CloudWatch within free tier.
 
-**Model selection is fixed.** All LLM calls use `anthropic.claude-haiku-4-5` —
-never Sonnet, never Opus. The verification agent fires every iteration and
-dominates spend. All embeddings use `amazon.titan-embed-text-v2:0`.
+**Model selection is fixed.** All LLM calls use one model — `gemini-2.5-flash`
+on the default provider, `anthropic.claude-haiku-4-5` on the Bedrock path. Never
+a larger tier: the verification agent fires every iteration and dominates spend.
+Embeddings use `gemini-embedding-001` (768 dims) or
+`amazon.titan-embed-text-v2:0` (1024 dims) respectively.
+
+### AWS still hosts four of the six layers
+
+Dropping Bedrock did not drop AWS. Bedrock was only the model-serving layer;
+the rest of the protocol is unchanged and still free-tier:
+
+| Layer | Where it runs | Cost |
+|---|---|---|
+| Corpus storage | **S3** standard (`ingest.py --upload-s3 BUCKET`) | free tier |
+| Index + orchestration + API | **EC2 t3.micro** — FAISS, LangGraph, FastAPI | free tier (750 h/mo, 12 mo) |
+| Per-iteration observability | **CloudWatch** custom metrics (`--cloudwatch`) | free tier (10 metrics) |
+| Model serving | Google Gemini free tier | free |
+
+The t3.micro is the intended host: FAISS at 768 dims over ~20k chunks is ~60 MB
+resident, which fits its 1 GB comfortably — one of the reasons the embedding
+dimension is truncated rather than left at the default 3072.
 
 ### How spend is actually prevented
 
@@ -65,19 +103,38 @@ python -c "from costs import TRACKER; print(TRACKER.summary())"
 ## Prerequisites
 
 1. **Python 3.11+** and `pip install -r requirements.txt`
-2. **AWS credentials** with `bedrock:InvokeModel`, in `us-east-1`
-   (`aws configure`, or an instance role).
-3. **Bedrock model access must be requested and approved** in the AWS console
-   before anything works — Bedrock → Model access → enable:
-   * Anthropic Claude Haiku 4.5
-   * Amazon Titan Text Embeddings V2
+2. **A Google AI Studio API key**, exported as `GEMINI_API_KEY`:
 
-   Without this, every call fails with `AccessDeniedException`.
-4. **Pricing constants** in `config.py` were verified 2026-08-16
-   (Haiku 4.5 $1/$5 per 1M; Titan Embeddings **V2** $0.02 per 1M — note v1/G1
-   bills 5× that, at $0.10). Re-check before the final runs: those three floats
-   drive every ΔC number in the paper. The AWS pricing page renders its tables
-   in JS, so confirm in the Bedrock console rather than by scraping the page.
+   ```bash
+   export GEMINI_API_KEY=...        # never commit this; never put it in config.py
+   ```
+
+   Everything except the key is in `config.py`. Without the key, real calls fail
+   immediately with a `RuntimeError` naming the variable — before any network
+   request. `DRY_RUN=1` needs no key at all.
+
+3. **Verify the provider before spending a request budget:**
+
+   ```bash
+   python -m llm --check
+   ```
+
+   Two tiny real calls. Reports the embedding dimension actually returned
+   (must match `config.EMBED_DIM`, or retrieval fails *silently*), whether
+   `temperature=0.0` was accepted, and the measured token counts.
+
+4. **AWS credentials** are still needed for S3 and CloudWatch (`aws configure`,
+   or an instance role) — but **not** for model access. To run the Bedrock path
+   instead, set `CAES_PROVIDER=bedrock`; it additionally needs
+   `bedrock:InvokeModel` in `us-east-1` and approved model access for Claude
+   Haiku 4.5 and Titan Text Embeddings V2.
+
+5. **Pricing constants** in `config.py` carry their source and verification
+   date — Gemini verified 2026-08-31 against
+   `ai.google.dev/gemini-api/docs/pricing`, Bedrock 2026-08-16. Re-check before
+   the final runs: those floats drive every ΔC number in the paper. Note the
+   free tier bills **nothing** for either Gemini model; these are list prices
+   used for notional accounting only.
 
 ---
 
@@ -89,7 +146,10 @@ Run the phases in order. Each one gates the next.
 
 ```bash
 DRY_RUN=1 python -m smoke      # full graph, canned responses, $0.00
-pytest -q                      # 60+ tests, no network, no credentials
+pytest -q                      # 113 tests, no network, no credentials
+
+CAES_PROVIDER=bedrock pytest -q                 # the retained provider path
+CAES_PROVIDER=bedrock DRY_RUN=1 python -m smoke
 ```
 
 `DRY_RUN=1` returns canned responses without touching the network. The smoke
@@ -180,17 +240,32 @@ curl -s localhost:8000/query -H 'content-type: application/json' \
 
 ## Cost table
 
-| Phase | What | Estimated |
-|---|---|---|
-| 0 | Wiring check (`DRY_RUN=1`) | **$0.00** |
-| 1 | Index build (~18k chunks embedded) | ~$0.05 |
-| 2 | Verifier calibration, 30 questions | ~$1 |
-| 3 | Baselines: fixed + one-shot, 150 questions each | ~$2 |
-| 4 | λ sweep on 50 held-out questions | ~$5 |
-| 5 | CAES test run + analysis | ~$15 |
-| | **Projected total** | **~$24** of the $40 ceiling |
+**Billed cost on the current provider is $0.00 at every phase** — the Gemini
+free tier charges nothing. The figures below are **list-price notional**: what
+these runs *would* cost on a paid account, computed from measured token counts.
+They are what the gate reads and what the paper reports; they are not an
+invoice. Bedrock-path estimates are given for comparison, since that path is
+retained.
 
-Re-runs cost far less: the disk cache replays everything already computed.
+| Phase | What | Notional (Gemini) | Notional (Bedrock) |
+|---|---|---|---|
+| 0 | Wiring check (`DRY_RUN=1`) | $0.00 | $0.00 |
+| 1 | Index build (~18k chunks embedded) | ~$0.06 | ~$0.05 |
+| 2 | Verifier calibration, 30 questions | ~$0.40 | ~$1 |
+| 3 | Baselines: fixed + one-shot, 150 questions each | ~$0.80 | ~$2 |
+| 4 | λ sweep on 50 held-out questions | ~$2 | ~$5 |
+| 5 | CAES test run + analysis | ~$6 | ~$15 |
+| | **Projected total** | **~$9 notional, $0.00 billed** | ~$24 |
+
+Gemini figures scale the Bedrock estimates by the published price ratio (input
+~3× cheaper, output ~2× cheaper) and are projections, not measurements — no run
+has happened yet. The λ sweep and calibration costs are the ones to watch, since
+[D-21] made the sweep deliberately dense.
+
+**The real budget is requests, not dollars.** Free-tier rate limits are
+per-account and unpublished per model, so `GEMINI_MAX_RPM` paces the client and
+`429`s are retried with the server's delay. Re-runs cost far less on either
+axis: the disk cache replays everything already computed.
 
 Embeddings are a rounding error on the query path — about **0.03%** of a
 three-iteration query. ΔC is, in practice, almost entirely the verifier and
@@ -247,6 +322,8 @@ cost term at all — but it is a working system with real cost data.
 ```
 caes/
 ├── DECISIONS.md            # START HERE if you are new — design rationale
+├── METHODOLOGY.md          # research design: hypothesis, controls, statistics
+├── IMPLEMENTATION.md       # code tour: modules, query lifecycle, extension points
 ├── CHANGELOG.md            # what landed, phase by phase
 ├── config.py               # all tunables: prices, budgets, model ids, λ
 ├── costs.py                # CostTracker, BudgetExceeded, persistent ledger

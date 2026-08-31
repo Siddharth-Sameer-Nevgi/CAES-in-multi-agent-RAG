@@ -32,7 +32,7 @@ def plan(
             or missing.strip().lower() in ("", "nothing", "none"):
         return question
 
-    import bedrock
+    import llm
 
     titles = ", ".join(sorted({
         getattr(c, "title", None) or c.get("title", "")
@@ -41,7 +41,7 @@ def plan(
 
     prompt = PLANNER_PROMPT.format(
         question=question, titles=titles[:1000], missing=missing)
-    resp = bedrock.invoke_llm(
+    resp = llm.invoke_llm(
         prompt, call_type="plan", query_id=query_id, iteration=iteration,
         max_tokens=MAX_PLAN_TOKENS, system=PLANNER_SYSTEM, policy=policy,
     )

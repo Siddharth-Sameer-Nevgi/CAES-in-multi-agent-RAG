@@ -4,9 +4,9 @@ Progress log for CAES-RAG. Entries are grouped by the implementation phase they
 belong to, in the order the phases were built. Each entry records what landed,
 and — where it matters — what was found broken and fixed along the way.
 
-This project is not under version control yet, so this file is the history.
-When git is initialised, keep appending here; commit messages are not a
-substitute, because most of the interesting content is *why*, not *what*.
+This file is the history. Keep appending here alongside commits; commit
+messages are not a substitute, because most of the interesting content is
+*why*, not *what*.
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 Rationale for anything marked **[D-n]** lives in [DECISIONS.md](DECISIONS.md).
@@ -360,3 +360,128 @@ Nothing is committed to these; they are the open items at the time of writing.
 - Consider a per-request cost meter so `api.py` no longer needs its global lock.
 - Consider recording retrieval-precision-at-k against HotpotQA supporting titles,
   to separate "the gate stopped too early" from "retrieval never found it".
+
+---
+
+## [0.2.0] — 2026-08-31
+
+**The evaluation provider changes from AWS Bedrock to Google Gemini.** Not a
+preference: Bedrock model invocation is blocked account-wide on this AWS
+account. Rationale, consequences and what was rejected are in
+[DECISIONS.md](DECISIONS.md) **[D-22]** and **[D-23]**.
+
+Still no paid call has been made. Ingest, calibration, λ tuning and the
+experiments all remain ahead.
+
+### The block
+
+`ListFoundationModels` succeeds and returns 120 models. `InvokeModel` fails with
+`ValidationException: Operation not allowed` for `amazon.titan-embed-text-v2:0`,
+`amazon.nova-lite-v1:0`, **and** through the AWS console playground — so it is
+not model-specific, not SDK-related, and not fixable from our side. A support
+case is open and unresolved. The project cannot wait on it.
+
+**AWS is not abandoned.** Bedrock was only the model-serving layer. S3, EC2 and
+CloudWatch remain in the deployment and are still free-tier.
+
+### Added
+
+- **`config.PROVIDER`** (`"bedrock" | "gemini"`, default `"gemini"`,
+  overridable with `CAES_PROVIDER`). `config.provider_settings()` resolves every
+  name that varies with it, so the switch has exactly one definition.
+- **Gemini price constants**, verified 2026-08-31 against
+  `ai.google.dev/gemini-api/docs/pricing` (paid tier, Standard row), in the same
+  style as the Titan correction in `[0.1.1]`:
+  `gemini-2.5-flash` $0.30/1M in, $2.50/1M out; `gemini-embedding-001` $0.15/1M.
+  Both models bill **nothing** on the free tier; these are list prices used for
+  notional accounting only.
+- **`python -m llm --check`** — a preflight making two tiny real calls, reporting
+  the embedding dimension actually returned, whether `temperature=0.0` was
+  accepted, and the measured token counts. Run before any ingest.
+- **`GEMINI_MAX_RPM`** client-side pacer and `429 RESOURCE_EXHAUSTED` retry
+  honouring the server-supplied `retryDelay`. Free-tier rate limiting is the
+  binding constraint now, not a credit balance.
+- **`EMBED_TOKENS_MODE`** — Gemini's `:embedContent` returns no token count, so
+  the count is measured with a separate `:countTokens` call rather than
+  estimated. `"estimated"` exists, warns loudly, and must be opted into. **[D-23]**
+- **`tests/conftest.py`** with fake transports for both providers, and
+  **`tests/test_provider.py`**. Transport-level tests now run once per provider;
+  the provider not under test is booby-trapped so a mis-routed call fails loudly.
+- **Index/model mismatch guard** in `Retriever`: an index whose dimension
+  disagrees with `config.EMBED_DIM` is refused with both numbers named, and a
+  `meta.json` naming a different embedding model warns. Previously this would
+  have been a *silent* retrieval failure.
+
+### Changed
+
+- **`bedrock.py` → `llm.py`** (`git mv`, history preserved). Every import
+  updated: `graph.py`, `ingest.py`, `retrieval.py`, `devdata.py`, `api.py`,
+  `smoke.py`, `agents/*`, and the tests. The Bedrock path is kept fully working
+  and fully tested — the support case may resolve, and a two-provider robustness
+  result would strengthen the paper.
+- **Price constants renamed** `PRICE_HAIKU_*` / `PRICE_TITAN_EMBED_PER_1K` →
+  `PRICE_LLM_INPUT_PER_1K` / `PRICE_LLM_OUTPUT_PER_1K` / `PRICE_EMBED_PER_1K`,
+  resolved from provider-prefixed constants. The published Bedrock figures are
+  unchanged and now pinned by test.
+- **`EMBED_DIM` 1024 → 768** on the Gemini path. `gemini-embedding-001` returns
+  3072 by default; 768 is a supported Matryoshka truncation that keeps a flat
+  index over ~20k chunks near 60 MB rather than 250 MB, which matters on the
+  t3.micro host. **Truncated vectors are not unit-norm as returned**, so
+  `llm.embed` now re-normalises unconditionally — without that, `IndexFlatIP`
+  stops meaning cosine.
+- **Cost-guard message** no longer names Bedrock.
+- Docs: `DECISIONS.md` §3, §4, §6 and records **[D-2]**, **[D-12]**, **[D-13]**,
+  **[D-19]**; `METHODOLOGY.md` §3.2, §3.3, §10 (External and Construct) and §11;
+  `IMPLEMENTATION.md` §1, §2, §5 and §10.
+
+### Fixed
+
+- `_estimate_tokens` is no longer reachable as a billing path on any provider.
+  Gemini LLM responses missing `usageMetadata` counts raise, matching **[D-2]**;
+  `countTokens` responses missing `totalTokens` raise for the same reason.
+
+### Models substituted
+
+The migration plan named `gemini-2.0-flash` and `text-embedding-004`. **Both
+were retired before this landed** — 2.0 Flash is listed under "Previous models /
+Shut down" and `text-embedding-004` is gone from the model list entirely
+(checked 2026-08-31). Substituted with their nearest live equivalents in the
+same tier, `gemini-2.5-flash` and `gemini-embedding-001`.
+
+### Two Gemini specifics that are cost-correctness issues
+
+- **Thinking is ON by default on `gemini-2.5-flash` and thinking tokens bill as
+  output.** Disabled with `thinkingConfig.thinkingBudget = 0`. Left on it would
+  inflate ΔC and, being variable in length, undermine the determinism **[D-19]**
+  relies on for cache correctness. `thoughtsTokenCount` is folded into the output
+  count regardless, so an ignored budget surfaces as measured cost rather than as
+  a silently understated ΔC.
+- **`temperature` moves to `generationConfig.temperature`.** Pinned for both
+  providers by `test_temperature_zero_is_sent_on_both_providers`. Whether the
+  service honours 0.0 in practice is an empirical question `python -m llm --check`
+  answers; it has not been run, because it needs a key.
+
+### Consequences for the results
+
+- **Actual spend is now structurally $0.00.** ΔC is entirely list-price notional.
+  The ledger and `HARD_BUDGET_USD` become vestigial safety rather than active
+  constraints — kept deliberately, because the Bedrock path may return and a
+  guard that only exists when needed is a guard that is wrong when it is needed.
+  The paper must report costs as **list-price-derived, not billed**.
+- **λ does not transfer.** Gemini input tokens are ~3× cheaper and output ~2×
+  cheaper than the Bedrock configuration, so the sensitive band moves. The
+  synthetic λ∈[40,70] finding from **[D-21]** does not carry over.
+- **Any prior expectation about the verifier rubric is invalid.** A different
+  model may use the four coverage bands differently, so `calibrate_verifier.py`
+  matters more than before, not less.
+
+### Verification
+
+- 113 tests pass (was 75), on `gemini` and on `CAES_PROVIDER=bedrock`.
+- `DRY_RUN=1 python -m smoke` reports `$0.00` with the ledger unmoved, on both
+  providers.
+- `CAES_PROVIDER=bedrock` still constructs its `bedrock-runtime` client.
+- No `GEMINI_API_KEY` value in the repo or its history; pinned by
+  `test_no_api_key_value_is_committed`.
+
+---
