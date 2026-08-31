@@ -223,6 +223,23 @@ python -m experiments.run --policy caes --n 150 --max-usd 5 --yes
 python -m experiments.analyze
 ```
 
+Add `--cloudwatch` to publish per-iteration cost, latency, coverage and depth to
+the `CAES-RAG` namespace. **Off by default**, so experiments stay runnable
+offline and with no AWS credentials at all. This is not decoration: it is what
+makes ΔC *observable per iteration in the deployment* rather than merely
+computed in-process.
+
+```bash
+python -m experiments.run --policy caes --n 150 --yes --cloudwatch
+```
+
+Requires `cloudwatch:PutMetricData` on the calling identity. If the call is
+refused the run continues normally and the results are unaffected — an
+observability backend must never be able to fail a valid experiment. Cardinality
+is four metric names × a `Policy` dimension, so a three-policy run creates
+twelve unique metrics against a free allowance of ten; `--cloudwatch-no-dimensions`
+collapses that to four.
+
 `run.py` checkpoints after **every** query to `results/{policy}_raw.jsonl`, so a
 crash at query 130 does not lose the first 129. Resume with `--resume`. If the
 run-budget guard trips mid-run, the partial results are already on disk — raise

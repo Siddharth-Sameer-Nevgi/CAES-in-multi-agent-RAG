@@ -312,6 +312,10 @@ def state_summary(state: State) -> dict[str, Any]:
                            if state["coverage_history"] else 0.0),
         "coverage_history": state["coverage_history"],
         "cost_history": [round(c, 8) for c in state["cost_history"]],
+        # Per-iteration latency, alongside the per-iteration cost and coverage
+        # series. Needed to publish latency per iteration to CloudWatch, and
+        # useful for the same reason the other two series are recorded.
+        "latency_history": [round(l, 2) for l in state.get("latency_history", [])],
         "n_evidence": len(state["evidence"]),
         "parse_failures": state.get("parse_failures", 0),
         "answer": state.get("answer") or "",

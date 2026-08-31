@@ -69,6 +69,7 @@ Three properties hold everywhere and everything else follows from them:
 | [experiments/run.py](experiments/run.py) | checkpointing experiment driver | `main`, `load_completed` |
 | [experiments/analyze.py](experiments/analyze.py) | table, figures, headline number | `headline`, `main_table` |
 | [devdata.py](devdata.py) | synthetic corpus for free pipeline testing | `main` |
+| [observability.py](observability.py) | optional CloudWatch publishing of per-iteration metrics | `CloudWatchPublisher` |
 | [smoke.py](smoke.py) | dry-run end-to-end wiring check | `main` |
 | [api.py](api.py) | minimal FastAPI serving layer | `app` |
 
@@ -341,6 +342,31 @@ python -m experiments.run --policy caes --resume
   allowance and resume. Exit code 1 signals an early stop.
 * Refuses to append to an existing output file without `--resume`, so two runs
   never silently interleave.
+
+### 8.1.1 Optional CloudWatch publishing
+
+`--cloudwatch` attaches a `CloudWatchPublisher` to the run loop. After every
+query it buffers that query's per-iteration `cost_history`, `latency_history`
+and `coverage_history` plus the query's `iterations_used`, and flushes in
+batches of at most 1000 datums (the `PutMetricData` limit).
+
+Three properties make it safe to leave in the driver:
+
+* **Off by default.** Experiments stay runnable offline, with no credentials.
+* **It cannot fail a run.** Every publish is wrapped; a refusal is logged, the
+  failure count is reported in the run summary, and the results are untouched.
+* **It touches nothing that matters.** Not the ledger, not the gate, not the
+  cache, not a single recorded number.
+
+Why it is methodologically load-bearing rather than decorative: §3.2 of
+[METHODOLOGY.md](METHODOLOGY.md) defines ΔC as *measured* marginal cost, metered
+per iteration. Publishing it per iteration makes that claim externally
+observable in the deployment instead of only inside the process.
+
+Cardinality is deliberately kept low — four metric names against a single
+`Policy` dimension. Adding `Iteration` as a dimension would multiply that by
+`MAX_ITERATIONS`; each iteration already emits its own datapoint, so only the
+by-index breakdown is given up. See `observability.py`.
 
 ### 8.2 Analysis
 

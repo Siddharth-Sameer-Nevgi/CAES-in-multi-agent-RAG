@@ -2,6 +2,7 @@
 
     python -m experiments.run --policy {fixed,oneshot,caes} --n 150 --max-usd 5 --yes
     python -m experiments.run --policy caes --resume
+    python -m experiments.run --policy caes --n 150 --yes --cloudwatch
 
 Checkpoints after every query, so a crash at query 130 does not lose the first
 129. --resume skips query ids already present in the output file.
@@ -80,6 +81,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true",
                     help="proceed past the cost confirmation")
     ap.add_argument("--out", type=Path, default=None)
+    # Off by default so experiments stay runnable offline and without AWS
+    # credentials. Publishing per-iteration cost is what makes dC observable in
+    # the deployment rather than merely computed; see observability.py.
+    ap.add_argument("--cloudwatch", action="store_true",
+                    help="publish per-iteration cost/latency/coverage/depth to "
+                         "the CAES-RAG CloudWatch namespace (off by default)")
+    ap.add_argument("--cloudwatch-no-dimensions", action="store_true",
+                    help="drop the Policy dimension: 4 unique metrics total "
+                         "instead of 4 per policy, to stay inside the free tier")
     args = ap.parse_args(argv)
 
     from costs import TRACKER
@@ -110,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"cumulative spend: ${TRACKER.cumulative():.2f} of "
           f"${config.HARD_BUDGET_USD:.2f} "
           f"(${TRACKER.remaining():.2f} left)")
+    print(f"provider        : {config.PROVIDER} ({config.MODEL_LLM})")
+    if args.cloudwatch:
+        print(f"cloudwatch      : on, namespace {config.CLOUDWATCH_NAMESPACE}"
+              + (" (no dimensions)" if args.cloudwatch_no_dimensions else ""))
     print("=" * 66)
     if projected > args.max_usd:
         print(f"WARNING: projection exceeds the run allowance. The run-budget "
@@ -122,6 +136,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     policy = build_policy(args.policy, n=args.fixed_n, lam=args.lam)
+
+    publisher = None
+    if args.cloudwatch:
+        from observability import CloudWatchPublisher
+        publisher = CloudWatchPublisher(
+            policy=args.policy,
+            dimensions=not args.cloudwatch_no_dimensions)
 
     # ---- run with checkpointing ----
     t_start = time.perf_counter()
@@ -143,6 +164,10 @@ def main(argv: list[str] | None = None) -> int:
                     fh.write(json.dumps(rec) + "\n")
                     fh.flush()          # checkpoint after EVERY query
                     n_done += 1
+
+                    if publisher is not None:
+                        # Never allowed to fail the run; see observability.py.
+                        publisher.record_query(rec)
 
                     print(f"[{i:>3}/{len(todo)}] {q['id'][:12]} "
                           f"it={rec['iterations_used']} "
@@ -178,6 +203,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  stop reasons    : {stops}")
     print(f"  wall time       : {elapsed:.0f}s")
     print(f"  cumulative spend: ${TRACKER.cumulative():.4f}")
+
+    if publisher is not None:
+        publisher.flush()
+        print(f"  {publisher.summary()}")
 
     from cache import CACHE
     CACHE.log_stats("run cache")

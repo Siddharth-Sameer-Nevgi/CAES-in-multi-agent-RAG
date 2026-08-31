@@ -485,3 +485,65 @@ same tier, `gemini-2.5-flash` and `gemini-embedding-001`.
   `test_no_api_key_value_is_committed`.
 
 ---
+
+## [0.2.1] — 2026-08-31
+
+AWS stays in the deployment. Bedrock was only the model-serving layer; four of
+the six layers still run on AWS at zero cost, and now demonstrably do.
+
+### Added
+
+- **`observability.py` — optional CloudWatch publishing.** `--cloudwatch` on
+  `experiments/run.py` publishes per-iteration cost, latency, coverage and
+  iteration count to the `CAES-RAG` namespace. **Off by default**, so
+  experiments stay runnable offline and with no AWS credentials.
+
+  Not decoration: METHODOLOGY §3.2 defines ΔC as *measured* marginal cost,
+  metered per iteration, and this makes it observable per iteration **in the
+  deployment** rather than only inside the process.
+
+  A publish failure is logged, counted in the run summary, and swallowed — an
+  observability backend must never be able to fail an experiment that is
+  otherwise producing valid data. Verified by deliberately failing publisher.
+- **`--cloudwatch-no-dimensions`.** Cardinality is four metric names × a
+  `Policy` dimension = four metrics per policy, so a three-policy run creates
+  twelve against a free allowance of ten. This flag collapses it to four.
+  `Iteration` is deliberately *not* a dimension: it would multiply cardinality
+  by `MAX_ITERATIONS` for a by-index breakdown, while each iteration already
+  emits its own datapoint.
+- **`tests/test_aws.py`** — 8 tests. The S3 upload is validated against the real
+  service model with botocore's `Stubber`, so a malformed `put_object` fails in
+  the suite rather than at ingest time; CloudWatch batching, dimensioning, the
+  1000-datum `PutMetricData` limit and the never-fail-the-run guarantee are
+  covered against a recording double. Neither reaches AWS.
+
+### Changed
+
+- `graph.state_summary` now carries `latency_history` alongside `cost_history`
+  and `coverage_history`. Additive; needed to publish latency per iteration, and
+  useful for the same reason the other two series are recorded.
+- README documents the four AWS layers that remain (S3 corpus, EC2 t3.micro host
+  for FAISS/LangGraph/FastAPI, CloudWatch metrics, all free tier) and why the
+  768-dimension embedding choice is partly a t3.micro memory decision.
+
+### Verified
+
+- 121 tests pass (was 113) on both providers; `DRY_RUN=1 python -m smoke` still
+  reports `$0.00` with the ledger unmoved.
+- `--cloudwatch` exercised end to end under `DRY_RUN=1`: 30 datums buffered
+  across 3 queries, the publish refused, **the run completed normally and the
+  results were unaffected** — which is the designed behaviour.
+
+### Two AWS findings that need the researcher's action
+
+- **`cloudwatch:PutMetricData` is denied** for `iam::099868052312:user/sid_nevgi`
+  — *"no identity-based policy allows the cloudwatch:PutMetricData action"*.
+  `ListMetrics` is denied too. The code path is verified; the permission is not
+  granted. Attach a policy allowing `cloudwatch:PutMetricData` before relying on
+  `--cloudwatch` for a real run.
+- **No S3 bucket exists** in the account (`ListBuckets` succeeds and returns
+  none). `ingest.py --upload-s3 BUCKET` is verified against the S3 service model
+  but has not been run live, because that needs a bucket to be created — a
+  persistent resource in the account, and not something to create unasked.
+
+---
