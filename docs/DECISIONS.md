@@ -840,3 +840,42 @@ Genuinely undecided, flagged so nobody assumes they were settled.
 5. **`FixedPolicy(n=3)` is the headline baseline.** Whether N=3 is the fair
    comparison, or whether the N that matches CAES's mean iteration count is
    fairer, is a framing decision worth making explicitly before writing up.
+
+6. **UNRESOLVED — the ledger does not record what [D-22] claims it records.**
+   Deliberately left open on 2026-08-31; decide before writing up.
+
+   **[D-22] says "actual spend is now always $0.00". The code does not do
+   that.** `CostTracker.record_llm` / `record_embed` compute cost from the price
+   table with no knowledge of the free tier, so the ledger accrues list price
+   for every network call. The first real preflight
+   (`python -m llm --check`) returned
+   `notional / actual usd: $0.00000430 / $0.00000430` — identical — and moved
+   the ledger to `$0.0000049` on calls Google billed nothing for.
+
+   The two counters are still meaningfully different, just not in the way
+   [D-22] describes:
+
+   | | Records | On a paid tier | On the free tier |
+   |---|---|---|---|
+   | ledger ("actual") | list price of calls that **hit the network** | money billed | money that *would* have been billed |
+   | notional | list price of **all** calls, cache hits included | — | — |
+
+   That distinction is the one [D-12] actually depends on (cache hits accrue
+   notional, never touch the ledger), so **[D-12] is unaffected and the gate is
+   correct**. What is wrong is [D-22]'s description, and its conclusion that
+   `HARD_BUDGET_USD` is "vestigial" — on this reading the ceiling is a live cap
+   on list-price exposure, which is a useful thing to keep.
+
+   Two ways to close it, not yet chosen:
+
+   * **Correct the documentation.** Leave the code alone; restate the ledger as
+     list-price exposure in [D-22], METHODOLOGY §3.3 and §10. Cheapest, and the
+     budget guard stays live.
+   * **Make actual genuinely $0.00.** Add a free-tier flag so the ledger records
+     zero. Makes [D-22] literally true, but budget guards read actual, so the
+     guard goes permanently inert — and silently so if billing is ever attached
+     to the Google account.
+
+   **Whichever is chosen, the paper's wording is already safe**: §10 (Construct)
+   says costs are list-price-derived and not billed, which is true under both
+   readings. The risk is confined to anyone reading the ledger as an invoice.
