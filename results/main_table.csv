@@ -1,0 +1,4 @@
+policy,n,mean_iterations,mean_cost_usd,mean_latency_ms,exact_match,f1,final_coverage,abstention_rate
+Fixed (N=3),50,3,0.001436085,24301.8646,0.6,0.6934349206349206,0.853,0.18
+One-shot routing,50,2.46,0.001183656,21481.9882,0.58,0.6693528693528693,0.853,0.2
+CAES,50,1.48,0.000662085,12132.9242,0.54,0.6293528693528694,0.767,0.22

@@ -1,0 +1,16 @@
+{
+  "n_questions": 500,
+  "n_passages": 4965,
+  "n_chunks": 5552,
+  "embed_model": "gemini-embedding-001",
+  "embed_dim": 768,
+  "chunk_tokens": 200,
+  "chunk_overlap_tokens": 30,
+  "sample_size": 500,
+  "split_seed": 20240917,
+  "dry_run": false,
+  "provider": "gemini",
+  "embed_input_tokens_exact": 684090,
+  "embed_usd_notional": 0.1026135,
+  "per_chunk_tokens_estimated": true
+}
