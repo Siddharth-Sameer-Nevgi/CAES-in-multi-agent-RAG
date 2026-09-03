@@ -170,7 +170,7 @@ MAX_ITERATIONS = 5    # absolute hard cap; a gate bug cannot exceed this
 MIN_ITERATIONS = 1
 
 # --- CAES parameters (LAMBDA is set by Phase 5 tuning; do not guess) ---
-LAMBDA = None          # must be set explicitly before CAES runs
+LAMBDA = 1000         # frozen 2026-09-02 from the tune split; see e505f0a. Do not re-tune.
 DECAY_FACTOR = 0.6     # dQ extrapolation
 
 # --- Retrieval ---
