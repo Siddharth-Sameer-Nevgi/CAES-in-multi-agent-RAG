@@ -215,6 +215,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"{config.INDEX_PATH} already exists — refusing to re-embed.\n"
               f"Delete it or pass --force if you really mean to spend again.")
+        # Embedding is what costs money; the passage list does not.
+        # Rebuilding it from the dataset is free and deterministic on
+        # SPLIT_SEED, so --upload-s3 still works against an already-built
+        # corpus -- the only state deploy/README.md step 2 is ever run in.
+        if args.upload_s3:
+            _, passages = build_corpus(
+                load_hotpotqa(args.sample, config.SPLIT_SEED))
+            upload_to_s3(args.upload_s3, passages)
         return 0
 
     import llm
